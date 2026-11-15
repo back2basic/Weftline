@@ -27,16 +27,23 @@ function validHttpDate(value) {
     value === `${day} ${month} ${number.startsWith('0') ? ' ' + number[1] : number} ${time} ${year}`;
 }
 
-async function readBounded(stream, limit, timeoutMs) {
+async function readBounded(stream, limit, timeoutMs, signal) {
   if (!stream) return Buffer.alloc(0);
   const reader = stream.getReader();
   const deadline = performance.now() + timeoutMs;
-  let timer;
+  let timer, abortWait;
   try {
+    if (signal.aborted) throw new Error('aborted');
     const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('deadline')), timeoutMs); });
+    const aborted = new Promise((_, reject) => {
+      abortWait = () => reject(new Error('aborted'));
+      signal.addEventListener('abort', abortWait, {once:true});
+      if (signal.aborted) abortWait();
+    });
     const chunks = []; let size = 0;
     for (;;) {
-      const {value, done} = await Promise.race([reader.read(), timeout]);
+      const {value, done} = await Promise.race([reader.read(), timeout, aborted]);
+      if (signal.aborted) throw new Error('aborted');
       if (performance.now() >= deadline) throw new Error('deadline');
       if (done) return Buffer.concat(chunks);
       size += value.byteLength;
@@ -46,7 +53,10 @@ async function readBounded(stream, limit, timeoutMs) {
   } catch (error) {
     try { Promise.resolve(reader.cancel()).catch(() => {}); } catch {}
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (abortWait) signal.removeEventListener('abort', abortWait);
+  }
 }
 
 export function createClientAuth({origin, endpoint, project, transport = fetch}) {
@@ -69,7 +79,7 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
       target = '/account/sessions/email'; method = 'POST';
       let data;
       try {
-        data = JSON.parse((await readBounded(request.body, 8192, 1000)).toString('utf8'));
+        data = JSON.parse((await readBounded(request.body, 8192, 1000, request.signal)).toString('utf8'));
       } catch (error) {
         if (error.message === 'deadline') return new Response('Request timeout', {status:408});
         if (error.message === 'too large') return new Response('Too large', {status:413});
@@ -93,20 +103,27 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
     if (session) headers.cookie = `${sessionName}=${session}`;
     let upstream;
     const controller = new AbortController();
-    let headerTimer, expired = false;
+    const signal = AbortSignal.any([controller.signal, request.signal]);
+    if (signal.aborted) return new Response('Authentication unavailable', {status:502});
+    let headerTimer, abortWait, expired = false;
     const deadline = performance.now() + 10000;
     try {
-      const request = Promise.resolve().then(() => transport(endpoint + target, {method,headers,body,redirect:'error',signal:controller.signal})).then(response => {
-        if (expired || performance.now() >= deadline) {
+      const request = Promise.resolve().then(() => { signal.throwIfAborted(); return transport(endpoint + target, {method,headers,body,redirect:'error',signal}); }).then(response => {
+        if (expired || signal.aborted || performance.now() >= deadline) {
           try { if (response.body && !response.body.locked) Promise.resolve(response.body.cancel()).catch(() => {}); } catch {}
           throw new Error('deadline');
         }
         return response;
       });
       const timeout = new Promise((_, reject) => { headerTimer = setTimeout(() => { expired = true; controller.abort(); reject(new Error('deadline')); }, 10000); });
-      upstream = await Promise.race([request, timeout]);
+      const aborted = new Promise((_, reject) => {
+        abortWait = () => reject(new Error('aborted'));
+        signal.addEventListener('abort', abortWait, {once:true});
+        if (signal.aborted) abortWait();
+      });
+      upstream = await Promise.race([request, timeout, aborted]);
     } catch { controller.abort(); return new Response('Authentication unavailable', {status:502,headers:{'cache-control':'no-store'}}); }
-    finally { clearTimeout(headerTimer); }
+    finally { clearTimeout(headerTimer); signal.removeEventListener('abort', abortWait); }
     try {
     if (upstream.status >= 300 && upstream.status < 400) return new Response('Authentication unavailable', {status:502,headers:{'cache-control':'no-store'}});
     if (path === '/login' && upstream.ok) {
@@ -119,7 +136,7 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
     if (path === '/logout' && upstream.ok) return new Response(null, {status:204,headers:{'set-cookie':'__Host-weftline=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict'}});
     if (path === '/account' && upstream.ok) {
       if (upstream.status === 204 || upstream.status === 205) return new Response(null, {status:upstream.status});
-      return new Response(await readBounded(upstream.body, 65536, 1000), {status:upstream.status,headers:{'content-type':'application/json'}});
+      return new Response(await readBounded(upstream.body, 65536, 1000, signal), {status:upstream.status,headers:{'content-type':'application/json'}});
     }
     const errorHeaders = {'cache-control':'no-store'};
     for (const name of ['retry-after','x-ratelimit-limit','x-ratelimit-remaining','x-ratelimit-reset']) {

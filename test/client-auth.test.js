@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { once } from 'node:events';
+import { once, getEventListeners } from 'node:events';
 import { connect } from 'node:net';
 import assert from 'node:assert/strict';
 import { createClientAuth } from '../src/client-auth.js';
@@ -170,6 +170,78 @@ test('rejects missing actual Host even when the request URL is reconstructed', a
  const handler=createClientAuth({origin:'https://board.example',endpoint:'https://baas.euregiohosting.nl/v1',project:'project',transport:async()=>{calls++;return new Response('{}');}});
  const result=await handler(new Request('https://board.example/account',{headers:{cookie:'__Host-weftline=valid','x-forwarded-host':'board.example'}}));
  assert.equal(result.status,403); assert.equal(calls,0);
+});
+
+test('login body abort is prompt, cancels and removes its abort listener', async t => {
+ const timers=[], original=setTimeout;
+ t.mock.method(globalThis,'setTimeout',(fn,ms,...args)=>{const timer=original(fn,ms,...args);if(ms===1000) timers.push(timer);return timer;});
+ let cancelled=false, calls=0, started;
+ const reading=new Promise(resolve=>{started=resolve;});
+ const stream=new ReadableStream({pull(){started();},cancel(){cancelled=true;return Promise.reject(Error('cancel failed'));}});
+ const controller=new AbortController();
+ const request=makeRequest('https://board.example/login',{method:'POST',headers:{origin:'https://board.example'},body:stream,duplex:'half',signal:controller.signal});
+ const baseline=getEventListeners(request.signal,'abort').length;
+ const handler=createClientAuth({origin:'https://board.example',endpoint:'https://baas.euregiohosting.nl/v1',project:'project',transport:async()=>{calls++;}});
+ const pending=handler(request); await reading; await new Promise(resolve=>setImmediate(resolve)); controller.abort();
+ let timer;
+ try {
+  const result=await Promise.race([pending,new Promise(resolve=>{timer=setTimeout(()=>resolve('stalled'),300);})]);
+  assert.notEqual(result,'stalled'); assert.equal(result.status,400); assert.equal(result.headers.get('cache-control'),'no-store');
+  assert.equal(cancelled,true); assert.equal(calls,0); assert.equal(getEventListeners(request.signal,'abort').length,baseline);
+  assert.equal(timers.length,1); assert.equal(timers[0]._destroyed,true);
+ } finally {clearTimeout(timer);}
+});
+
+test('already-aborted login cancels without starting a read or upstream call', async () => {
+ let cancelled=false, calls=0, pulls=0;
+ const stream=new ReadableStream({pull(){pulls++;},cancel(){cancelled=true;return Promise.reject(Error('cancel failed'));}},{highWaterMark:0});
+ const controller=new AbortController(); controller.abort();
+ const request=makeRequest('https://board.example/login',{method:'POST',headers:{origin:'https://board.example'},body:stream,duplex:'half',signal:controller.signal});
+ const baseline=getEventListeners(request.signal,'abort').length;
+ const handler=createClientAuth({origin:'https://board.example',endpoint:'https://baas.euregiohosting.nl/v1',project:'project',transport:async()=>{calls++;}});
+ const result=await handler(request);
+ assert.equal(result.status,400); assert.equal(cancelled,true); assert.equal(pulls,0); assert.equal(calls,0);
+ assert.equal(getEventListeners(request.signal,'abort').length,baseline);
+});
+
+test('successful and oversized login reads remove abort listeners and clear their deadline timers', async t => {
+ const timers=[];
+ const original=setTimeout;
+ t.mock.method(globalThis,'setTimeout',(fn,ms,...args)=>{const timer=original(fn,ms,...args); if(ms===1000) timers.push(timer); return timer;});
+ for (const [body,status] of [[JSON.stringify({email:'a',password:'b'}),201],['x'.repeat(8193),413]]) {
+  const request=makeRequest('https://board.example/login',{method:'POST',headers:{origin:'https://board.example'},body});
+  const baseline=getEventListeners(request.signal,'abort').length;
+  const handler=createClientAuth({origin:'https://board.example',endpoint:'https://baas.euregiohosting.nl/v1',project:'project',transport:async()=>new Response(null,{status:201,headers:{'set-cookie':'a_session_project=valid'}})});
+  assert.equal((await handler(request)).status,status);
+  assert.equal(getEventListeners(request.signal,'abort').length,baseline);
+ }
+ assert.equal(timers.length,2); assert.ok(timers.every(timer=>timer._destroyed));
+});
+
+test('abort after upstream headers but before the account read cancels without reading', async () => {
+ let cancelled=false, pulls=0;
+ const controller=new AbortController();
+ const body=new ReadableStream({pull(){pulls++;},cancel(){cancelled=true;}},{highWaterMark:0});
+ const response=new Response(body);
+ Object.defineProperty(response,'status',{get(){controller.abort();return 200;}});
+ const handler=createClientAuth({origin:'https://board.example',endpoint:'https://baas.euregiohosting.nl/v1',project:'project',transport:async()=>response});
+ const result=await handler(makeRequest('https://board.example/account',{headers:{cookie:'__Host-weftline=valid'},signal:controller.signal}));
+ assert.equal(result.status,502); assert.equal(cancelled,true); assert.equal(pulls,0);
+});
+
+test('client abort promptly cancels an abort-ignoring upstream account body', async () => {
+ let cancelled=false, started;
+ const reading=new Promise(resolve=>{started=resolve;});
+ const stream=new ReadableStream({pull(){started();},cancel(){cancelled=true;return Promise.reject(Error('cancel failed'));}});
+ const handler=createClientAuth({origin:'https://board.example',endpoint:'https://baas.euregiohosting.nl/v1',project:'project',transport:async()=>new Response(stream)});
+ const controller=new AbortController();
+ const pending=handler(makeRequest('https://board.example/account',{headers:{cookie:'__Host-weftline=valid'},signal:controller.signal}));
+ await reading; await new Promise(resolve=>setImmediate(resolve)); controller.abort();
+ let timer;
+ try {
+  const result=await Promise.race([pending,new Promise(resolve=>{timer=setTimeout(()=>resolve('stalled'),300);})]);
+  assert.notEqual(result,'stalled'); assert.equal(result.status,502); assert.equal(result.headers.get('cache-control'),'no-store'); assert.equal(cancelled,true);
+ } finally {clearTimeout(timer);}
 });
 
 test('stalled upstream account body fails closed without leaking partial data', async () => {
