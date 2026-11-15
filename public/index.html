@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Weftline — project status</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172329; background: #f4f6f3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { background: #163c39; color: #fff; padding: 1.2rem max(1.5rem, calc((100vw - 68rem) / 2)); }
+    header strong { font-size: 1.25rem; letter-spacing: .02em; }
+    main { max-width: 68rem; margin: auto; padding: 3rem 1.5rem; }
+    h1 { font-size: clamp(2rem, 5vw, 3.25rem); line-height: 1.1; margin: .5rem 0 1rem; }
+    .eyebrow { color: #28665c; font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
+    .intro { max-width: 44rem; font-size: 1.1rem; line-height: 1.6; }
+    .notice { border-left: 4px solid #b87719; background: #fff7e9; padding: 1rem 1.25rem; margin: 2rem 0; line-height: 1.5; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 1rem; }
+    section.card { background: white; border: 1px solid #d8e2dc; border-radius: .6rem; padding: 1.25rem; }
+    h2 { font-size: 1.1rem; margin: 0 0 .75rem; }
+    p { line-height: 1.55; }
+    .status { color: #734812; font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+    footer { margin-top: 3rem; color: #566963; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <header><strong>Weftline</strong></header>
+  <main>
+    <div class="eyebrow">Project status · v0.1</div>
+    <h1>A place for work, built with privacy first.</h1>
+    <p class="intro">Weftline is an early-stage project for coordinating work and knowledge. This page is a public status page, not a working task board.</p>
+    <div class="notice"><strong>Private by default.</strong> Authentication is not available on this status page, and no task data is shown here. The experimental <a href="/board/login">private board</a> requires separate configuration and is not ready for production.</div>
+    <div class="grid">
+      <section class="card"><h2>Task board</h2><span class="status">Not available</span><p>Login and task data access are currently disabled even when configured. Shared boards are not implemented.</p></section>
+      <section class="card"><h2>Agent coordination</h2><span class="status">Not available</span><p>Agent execution is not available. Claims, audit history and safe concurrent work are not implemented.</p></section>
+      <section class="card"><h2>Knowledge</h2><span class="status">Not available</span><p>Private documents and search have not been implemented.</p></section>
+    </div>
+    <footer>Service health is available at <a href="/health">/health</a>. Health does not indicate that a board or storage is connected.</footer>
+  </main>
+</body>
+</html>
