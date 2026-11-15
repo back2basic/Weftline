@@ -90,3 +90,30 @@ test('login page explains sign-in is unavailable', async () => {
  const r=await handle(new Request('https://board.example/board/login'));
  assert.match(await r.text(),/sign.in.*unavailable/i);
 });
+
+test('board groups persisted tasks into ordered workflow columns, including empty columns', async () => {
+ const rows=[{title:'Review task',status:'review'},{title:'Ready task',status:'ready'},{title:'Blocked task',status:'blocked'},{title:'Another ready task',status:'ready'},{title:'Done task',status:'done'}];
+ const handle=createBoardHandler({origin:'https://board.example',appwrite:async()=>({ok:true,data:{rows}})});
+ const r=await handle(new Request('https://board.example/board',{headers:{cookie:'__Host-weftline=opaque-session'}}));
+ const html=await r.text();
+ const sections=[...html.matchAll(/<section\b[^>]*>([\s\S]*?)<\/section>/g)].map(match=>match[1]);
+ assert.equal(sections.length,5);
+ for (const [i,heading] of ['Ready','In progress','Review','Blocked','Done'].entries()) assert.match(sections[i],new RegExp(`<h2[^>]*>${heading}</h2>`,'i'));
+ assert.match(sections[0],/Ready task/); assert.match(sections[0],/Another ready task/);
+ assert.match(sections[1],/No tasks/i);
+ for (const [i,title] of [[2,'Review task'],[3,'Blocked task'],[4,'Done task']]) assert.match(sections[i],new RegExp(title));
+ for (const [i,section] of sections.entries()) for (const row of rows) assert.equal(section.includes(row.title), ['ready','in_progress','review','blocked','done'][i]===row.status);
+});
+
+test('board visibly preserves tasks with unexpected statuses and escapes their content', async () => {
+ const rows=[{title:'<img src=x onerror="evil()"> & \'title\'',status:'<script>bad & "status"</script>'},{title:'Missing status'},{title:'Prototype status',status:'__proto__'}];
+ const handle=createBoardHandler({origin:'https://board.example',appwrite:async()=>({ok:true,data:{rows}})});
+ const r=await handle(new Request('https://board.example/board',{headers:{cookie:'__Host-weftline=opaque-session'}}));
+ const html=await r.text();
+ const section=[...html.matchAll(/<section\b[^>]*>([\s\S]*?)<\/section>/g)].map(match=>match[1]).find(value=>/<h2[^>]*>Unexpected status<\/h2>/i.test(value));
+ assert.ok(section,'unexpected-status column is visible');
+ assert.match(section,/&lt;img src=x onerror=&quot;evil\(\)&quot;&gt; &amp; &#39;title&#39;/);
+ assert.match(section,/&lt;script&gt;bad &amp; &quot;status&quot;&lt;\/script&gt;/);
+ assert.match(section,/Missing status/); assert.match(section,/Prototype status/); assert.match(section,/__proto__/);
+ assert.doesNotMatch(html,/<img src=x|<script>bad/);
+});
