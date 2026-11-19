@@ -96,7 +96,7 @@ test('development server binds loopback by default', async t => {
 
 test('configured login page does not expose the server key', async t => {
   const secret = 'server-only-test-key';
-  const {url} = await startServer(t, {BOARD_ORIGIN:'https://board.example',APPWRITE_ENDPOINT:'https://appwrite.example/v1',APPWRITE_PROJECT:'6afa1a52001753a01f2a',APPWRITE_API_KEY:secret});
+  const {url} = await startServer(t, {BOARD_ORIGIN:'https://board.example',APPWRITE_ENDPOINT:'https://provider.example.test/v1',APPWRITE_PROJECT:'synthetic-project',APPWRITE_API_KEY:secret,WEFTLINE_APPROVED_APPWRITE_ENDPOINT:'https://provider.example.test/v1',WEFTLINE_APPROVED_APPWRITE_PROJECT:'synthetic-project'});
   const r = await fetch(`${url}/board/login`);
   assert.equal(r.status,200);
   assert.doesNotMatch(await r.text(),new RegExp(secret));
@@ -108,7 +108,7 @@ test('server can bind an explicitly configured proxy-facing address', async t =>
 });
 
 test('configured board data remains unavailable while authentication protection is unverified', async t => {
- const {url}=await startServer(t,{BOARD_ORIGIN:'https://board.example',APPWRITE_ENDPOINT:'https://appwrite.example/v1',APPWRITE_PROJECT:'6afa1a52001753a01f2a',APPWRITE_API_KEY:'test-only'});
+ const {url}=await startServer(t,{BOARD_ORIGIN:'https://board.example',APPWRITE_ENDPOINT:'https://appwrite.example/v1',APPWRITE_PROJECT:'synthetic-project',APPWRITE_API_KEY:'test-only'});
  const r=await fetch(`${url}/board`,{headers:{cookie:'__Host-weftline=opaque-session'}});
  assert.equal(r.status,503);
 });

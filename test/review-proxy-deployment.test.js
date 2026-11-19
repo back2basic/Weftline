@@ -1,0 +1,39 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn,spawnSync} from 'node:child_process';
+import net from 'node:net';
+import {randomBytes} from 'node:crypto';
+import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
+import {join} from 'node:path';
+import http from 'node:http';
+import {startVersionedProvider} from './fixtures/knowledge-versioned-http-provider.js';
+
+const origin='https://app.example.test',endpoint='https://provider.example.test/v1',project='synthetic-project';
+test('opt-in proxy listener gates and serves synthetic versioned workflow', {timeout:20000}, async t=>{
+ const provider=await startVersionedProvider();t.after(()=>provider.close());
+ const dir=mkdtempSync(join(process.env.TMPDIR,'proxy-test-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const api=join(dir,'api');writeFileSync(api,`apikey:synthetic-key\nprojectID:${project}\nendpoint:${endpoint}\n`);
+ const preload=join(dir,'preload.mjs');writeFileSync(preload,`await import(${JSON.stringify(new URL('./fixtures/knowledge-versioned-cli-proxy.js',import.meta.url).href)});const fetch0=globalThis.fetch;globalThis.fetch=(u,o)=>String(u).endsWith('/account/sessions/email')?Promise.resolve(new Response('{}',{status:201,headers:{'set-cookie':'a_session_synthetic-project=alice; Path=/; Secure; HttpOnly'}})):fetch0(u,o);`);
+ const secret=randomBytes(32).toString('hex');
+ const env={PATH:process.env.PATH,TMPDIR:process.env.TMPDIR,NODE_OPTIONS:`--import ${preload}`,VERSIONED_FIXTURE_PORT:String(provider.port),WEFTLINE_REVIEW_ENABLE:'1',WEFTLINE_REVIEW_PROTOCOL:'review-v1',WEFTLINE_REVIEW_AUTH:'1',WEFTLINE_REVIEW_UI:'1',WEFTLINE_REVIEW_PROXY:'1',WEFTLINE_PROXY_SECRET:secret,WEFTLINE_PUBLIC_ORIGIN:origin,WEFTLINE_REVIEW_HOST:'127.0.0.1',PORT:'0',WEFTLINE_REVIEW_BOARD:'board',APPWRITE_ENDPOINT:endpoint,APPWRITE_PROJECT:project,WEFTLINE_APPROVED_APPWRITE_ENDPOINT:endpoint,WEFTLINE_APPROVED_APPWRITE_PROJECT:project,APPWRITE_DATABASE:'db',APPWRITE_TABLE:'review',WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED:'1',WEFTLINE_KNOWLEDGE_VERSIONED_UI:'1',WEFTLINE_KNOWLEDGE_VERSIONED_DATABASE_ID:'db',WEFTLINE_KNOWLEDGE_VERSIONED_TABLE_ID:'versions',WEFTLINE_KNOWLEDGE_DATABASE_ID:'db',WEFTLINE_KNOWLEDGE_TABLE_ID:'legacy',WEFTLINE_KNOWLEDGE_TEAM_ID:'team',WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES:'1024',APPWRITE_KEY_FILE:api};
+ for(const change of [{WEFTLINE_PROXY_SECRET:''},{WEFTLINE_PUBLIC_ORIGIN:'http://app.example.test'},{WEFTLINE_REVIEW_KNOWLEDGE_V2:'1'},{WEFTLINE_REVIEW_PROXY:'0'}]){const r=spawnSync(process.execPath,['experimental/review-v1-cli.js'],{env:{...env,...change,APPWRITE_KEY_FILE:'/missing/must-not-read'},timeout:3000});assert.notEqual(r.status,0);assert.match(r.stderr.toString(),/Disabled or invalid configuration/);}
+ const child=spawn(process.execPath,['src/server.js'],{env});let output='';child.stdout.on('data',x=>output+=x);child.stderr.on('data',x=>output+=x);t.after(async()=>{if(child.exitCode===null&&child.signalCode===null){child.kill();await new Promise(r=>child.once('exit',r));}});
+ const port=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error(output)),5000);child.once('exit',()=>{clearTimeout(timer);reject(Error(`listener exit: ${output}`));});child.stdout.on('data',()=>{const m=output.match(/listener .*:(\d+)/);if(m){clearTimeout(timer);resolve(+m[1]);}});});
+ const send=(path,{body,headers={},method=body?'POST':'GET'}={})=>new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port,path,method,headers:{host:'app.example.test','x-weftline-proxy-secret':secret,origin,'sec-fetch-site':'same-origin','sec-fetch-mode':'cors','sec-fetch-dest':'empty',...(body?{'content-type':'application/json'}:{}),...headers}},res=>{let text='';res.on('data',x=>text+=x);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,text}));});req.on('error',reject);req.end(body?JSON.stringify(body):undefined);});
+ const raw=(extra,credential=true)=>new Promise((resolve,reject)=>{let out='';const s=net.connect(port,'127.0.0.1',()=>s.end(`GET /health HTTP/1.1\r\nHost: app.example.test\r\n${credential?`X-Weftline-Proxy-Secret: ${secret}\r\n`:''}${extra}Connection: close\r\n\r\n`));s.on('data',x=>out+=x);s.on('end',()=>resolve(out));s.on('error',reject);});
+ for(const extra of [`X-Weftline-Proxy-Secret: ${secret}\r\n`,'Host: app.example.test\r\n','Forwarded: for=1.2.3.4\r\n','Origin: https://evil.example\r\n'])assert.match(await raw(extra),/^HTTP\/1\.1 (400|403)\b/);
+ assert.equal((await send('/health',{headers:{'x-weftline-proxy-secret':randomBytes(32).toString('hex')}})).status,403);
+ assert.match(await raw('',false),/^HTTP\/1\.1 403\b/);
+ assert.equal((await send('/health',{headers:{host:'evil.example'}})).status,403);
+ assert.equal((await send('/health',{headers:{'sec-fetch-site':'cross-site'}})).status,403);
+ assert.equal((await send('/health')).status,200);
+ assert.equal((await send('/knowledge/v2/read',{body:{},headers:{cookie:'__Host-weftline=alice'}})).status,404);
+ const login=await send('/login',{body:{email:'alice@example.test',password:'synthetic'}});assert.equal(login.status,201);const cookie=login.headers['set-cookie'][0].split(';')[0];
+ const draft={expectedActor:'alice',documentId:'doc',operationId:'00000000000000000000000000000001',title:'Title',html:'Body'};
+ assert.equal(JSON.parse((await send('/knowledge/versioned/create',{body:draft,headers:{cookie}})).text).status,'confirmed');
+ assert.equal(JSON.parse((await send('/knowledge/versioned/read',{body:{expectedActor:'alice',documentId:'doc',generation:0},headers:{cookie}})).text).version.html,'Body');
+ const before=(await provider.control('metrics')).requests.length;
+ assert.equal((await send('/knowledge/versioned/read',{body:{expectedActor:'alice',documentId:'doc',generation:0},headers:{cookie,origin:'https://evil.example'}})).status,403);
+ assert.equal((await send('/knowledge/versioned/read',{body:{expectedActor:'alice',documentId:'doc',generation:0},headers:{cookie,'x-forwarded-for':'1.2.3.4'}})).status,403);
+ assert.equal((await provider.control('metrics')).requests.length,before);assert(!output.includes(secret));
+});

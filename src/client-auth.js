@@ -59,13 +59,17 @@ async function readBounded(stream, limit, timeoutMs, signal) {
   }
 }
 
-export function createClientAuth({origin, endpoint, project, transport = fetch}) {
-  if (endpoint !== 'https://baas.euregiohosting.nl/v1') throw new Error('Invalid endpoint');
+export function createClientAuth({origin, endpoint, project, approvedEndpoint, approvedProject, transport = fetch, parseLogin, parseLogout}) {
+  let url;
+  try { url = new URL(endpoint); } catch { throw new Error('Invalid authority'); }
+  if (typeof endpoint !== 'string' || endpoint !== approvedEndpoint || project !== approvedProject ||
+      typeof project !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(project) || url.protocol !== 'https:' ||
+      url.username || url.password || url.search || url.hash || url.pathname !== '/v1' || url.href !== endpoint) throw new Error('Invalid authority');
   const originUrl = new URL(origin);
   if (originUrl.protocol !== 'https:' || originUrl.origin !== origin || originUrl.username || originUrl.password) throw new Error('Invalid origin');
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(project)) throw new Error('Invalid project');
   const sessionName = `a_session_${project}`;
-  async function handle(request) {
+  const unknownLogin = () => new Response('Sign-in outcome unknown; a provider session may exist. Do not retry blindly.', {status:502,headers:{'cache-control':'no-store'}});
+  async function handle(request, state) {
     const requestOrigin = request.headers.get('origin');
     // Adapter must preserve the actual Host header, including duplicate values;
     // never synthesize it from the configured origin or forwarded headers.
@@ -76,10 +80,22 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
     const path = new URL(request.url).pathname;
     let target, method, body, session;
     if (path === '/login' && request.method === 'POST') {
+      // Do not overwrite an existing session reference, even if the cookie is
+      // ambiguous or malformed. Other malformed Cookie headers also fail closed.
+      const cookie = request.headers.get('cookie');
+      if (cookie !== null) {
+        const parts = cookie.split(';');
+        const validPair = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+=(?:[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*|"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*")$/;
+        if (parts.some(part => {
+          const pair = part.trim();
+          return !validPair.test(pair) || pair.slice(0, pair.indexOf('=')) === '__Host-weftline';
+        })) return new Response('Sign-in blocked; existing session state is not confirmed. Do not retry blindly.', {status:409});
+      }
       target = '/account/sessions/email'; method = 'POST';
       let data;
       try {
-        data = JSON.parse((await readBounded(request.body, 8192, 1000, request.signal)).toString('utf8'));
+        const bytes = await readBounded(request.body, 8192, 1000, request.signal);
+        data = parseLogin ? parseLogin(bytes) : JSON.parse(bytes.toString('utf8'));
       } catch (error) {
         if (error.message === 'deadline') return new Response('Request timeout', {status:408});
         if (error.message === 'too large') return new Response('Too large', {status:413});
@@ -95,7 +111,12 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
       target = path === '/account' ? '/account' : '/account/sessions/current';
       method = path === '/account' ? 'GET' : 'DELETE';
       if (path === '/logout') {
-        try { if (request.body && !request.body.locked) Promise.resolve(request.body.cancel()).catch(() => {}); } catch {}
+        if (parseLogout) {
+          try { parseLogout(await readBounded(request.body, 4096, 1000, request.signal)); }
+          catch { return new Response('Invalid logout', {status:400}); }
+        } else {
+          try { if (request.body && !request.body.locked) Promise.resolve(request.body.cancel()).catch(() => {}); } catch {}
+        }
       }
     } else return new Response('Not found', {status:404});
     const headers = {'x-appwrite-project':project};
@@ -108,7 +129,7 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
     let headerTimer, abortWait, expired = false;
     const deadline = performance.now() + 10000;
     try {
-      const request = Promise.resolve().then(() => { signal.throwIfAborted(); return transport(endpoint + target, {method,headers,body,redirect:'error',signal}); }).then(response => {
+      const request = Promise.resolve().then(() => { signal.throwIfAborted(); state.dispatched = true; return transport(endpoint + target, {method,headers,body,redirect:'error',signal}); }).then(response => {
         if (expired || signal.aborted || performance.now() >= deadline) {
           try { if (response.body && !response.body.locked) Promise.resolve(response.body.cancel()).catch(() => {}); } catch {}
           throw new Error('deadline');
@@ -122,15 +143,25 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
         if (signal.aborted) abortWait();
       });
       upstream = await Promise.race([request, timeout, aborted]);
-    } catch { controller.abort(); return new Response('Authentication unavailable', {status:502,headers:{'cache-control':'no-store'}}); }
+    } catch { controller.abort(); return path === '/login' && state.dispatched ? unknownLogin() : new Response('Authentication unavailable', {status:502,headers:{'cache-control':'no-store'}}); }
     finally { clearTimeout(headerTimer); signal.removeEventListener('abort', abortWait); }
     try {
+    if (path === '/login' && !upstream.ok) {
+      const result = unknownLogin();
+      // A response does not prove that the provider did not create a session.
+      // Forward only validated guidance; retain the indeterminate outcome.
+      for (const name of ['retry-after','x-ratelimit-limit','x-ratelimit-remaining','x-ratelimit-reset']) {
+        const value = upstream.headers.get(name);
+        if (value && (/^[0-9]{1,16}$/.test(value) || (name === 'retry-after' && validHttpDate(value)))) result.headers.set(name, value);
+      }
+      return result;
+    }
     if (upstream.status >= 300 && upstream.status < 400) return new Response('Authentication unavailable', {status:502,headers:{'cache-control':'no-store'}});
     if (path === '/login' && upstream.ok) {
       const cookies = upstream.headers.getSetCookie().filter(value => value.startsWith(sessionName + '='));
-      if (cookies.length !== 1) return new Response('Authentication unavailable', {status:502});
+      if (cookies.length !== 1) return unknownLogin();
       const value = cookies[0].slice(sessionName.length + 1).split(';')[0];
-      if (!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(value)) return new Response('Authentication unavailable', {status:502});
+      if (!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(value)) return unknownLogin();
       return new Response(null, {status:upstream.status,headers:{'set-cookie':`__Host-weftline=${value}; Path=/; Secure; HttpOnly; SameSite=Strict`}});
     }
     if (path === '/logout' && upstream.ok) return new Response(null, {status:204,headers:{'set-cookie':'__Host-weftline=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict'}});
@@ -151,8 +182,9 @@ export function createClientAuth({origin, endpoint, project, transport = fetch})
   }
   return async request => {
     let response;
-    try { response = await handle(request); }
-    catch { response = new Response('Authentication unavailable', {status:502}); }
+    const state = {dispatched:false};
+    try { response = await handle(request, state); }
+    catch { response = state.dispatched && new URL(request.url).pathname === '/login' ? unknownLogin() : new Response('Authentication unavailable', {status:502}); }
     finally {
       try { if (request.body && !request.body.locked) Promise.resolve(request.body.cancel()).catch(() => {}); } catch {}
     }

@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { createNodeAuthAdapter } from '../src/node-auth-adapter.js';
 
 const origin = 'https://board.example';
-const config = { origin, endpoint:'https://baas.euregiohosting.nl/v1', project:'project' };
+const config = { origin, endpoint:'https://appwrite.example.test/v1', project:'project', approvedEndpoint:'https://appwrite.example.test/v1', approvedProject:'project' };
 async function fixture(t, transport) {
   const server = http.createServer(createNodeAuthAdapter({...config, transport}));
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -26,7 +26,7 @@ test('real HTTP login reaches fake provider and delivers session cookie', async 
   const seen=[];
   const port=await fixture(t, async (url,options) => { seen.push([url,options]); return new Response(null,{status:201,headers:{'set-cookie':'a_session_project=abc; Path=/'}}); });
   const result=await request(port,{method:'POST',path:'/login',headers:{host:'board.example',origin,'content-type':'application/json'}},JSON.stringify({email:'a',password:'b'}));
-  assert.equal(result.status,201); assert.match(result.headers['set-cookie'][0],/^__Host-weftline=abc;/); assert.equal(seen.length,1); assert.equal(seen[0][0],'https://baas.euregiohosting.nl/v1/account/sessions/email');
+  assert.equal(result.status,201); assert.match(result.headers['set-cookie'][0],/^__Host-weftline=abc;/); assert.equal(seen.length,1); assert.equal(seen[0][0],'https://appwrite.example.test/v1/account/sessions/email');
 });
 
 test('rejected stalled upload receives 403 and its socket closes', async t => {

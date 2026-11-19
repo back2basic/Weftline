@@ -50,7 +50,7 @@ export function createNodeAuthAdapter(config, handle = createClientAuth(config))
       }
       const request = new Request(config.origin + req.url, {method:req.method, headers:req.headers, signal:controller.signal,
         ...(stream ? {body:stream, duplex:'half'} : {})});
-      const response = await handle(request);
+      const response = await handle(request, req.url);
       if (res.destroyed) { if (response.body) void response.body.cancel().catch(() => {}); return; }
       if (abandoned || !req.complete) res.setHeader('connection','close');
       for (const [name, value] of response.headers) res.setHeader(name, value);
