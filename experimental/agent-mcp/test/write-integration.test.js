@@ -59,14 +59,21 @@ test('opt-in MCP claims and submits through listener with persisted exact receip
  const transport=new StdioClientTransport({command:process.execPath,args:[resolve(root,'experimental/agent-mcp/server.js'),'--enable','--endpoint',origin,'--ca',cert,'--actor','alice','--board','b','--guard','1','--enable-writes','--journal',journal,...scopeArgs(endpoint,project)],env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice'},stderr:'pipe'});
  const client=new Client({name:'write-test',version:'1'});t.after(()=>client.close());await client.connect(transport);
  const tools=(await client.listTools()).tools.map(x=>x.name);assert(tools.includes('claim'));assert(tools.includes('submit'));assert(tools.includes('reconcile'));
+ const firstRead=await client.callTool({name:'resolve',arguments:{task:'task'}});assert.notEqual(firstRead.isError,true);const firstCursor=JSON.parse(firstRead.content[0].text).continuation;assert(firstCursor);
+ for(const guardGeneration of [-1,1.5,999999,'1',null]){const rejected=await client.callTool({name:'resolve',arguments:{task:'task',guardGeneration}});assert.equal(rejected.isError,true);}
  const invalid=await client.callTool({name:'claim',arguments:{operation:'claim1',task:'task',guardGeneration:1,taskGeneration:0,expectedActor:'bob'}});assert.equal(JSON.parse(invalid.content[0].text).status,'invalid');
  const claim=await client.callTool({name:'claim',arguments:{operation:'claim1',task:'task',guardGeneration:1,taskGeneration:0}});assert.equal(JSON.parse(claim.content[0].text).status,'recorded');
  assert.equal((await client.callTool({name:'resolve',arguments:{task:'task'}})).isError,true);
+ const sameClientResolved=await client.callTool({name:'resolve',arguments:{task:'task',guardGeneration:2}});assert.notEqual(sameClientResolved.isError,true);assert.equal(JSON.parse(sameClientResolved.content[0].text).observed.state,'claimed');
+ const crossGuard=await client.callTool({name:'resolve',arguments:{task:'task',guardGeneration:2,continuation:firstCursor}});assert(crossGuard.isError===true||JSON.parse(crossGuard.content[0].text).status==='unknown');
+ const discovered=await client.callTool({name:'discover',arguments:{guardGeneration:2}});assert.notEqual(discovered.isError,true);assert.equal(JSON.parse(discovered.content[0].text).status,'partial');
  const newerBase=[...base];newerBase[newerBase.indexOf('--guard')+1]='2';
  const newTransport=new StdioClientTransport({command:process.execPath,args:[...newerBase,'--enable-writes','--journal',journal,...scopeArgs(endpoint,project)],env:childEnv,stderr:'pipe'});
  const newClient=new Client({name:'new-guard-test',version:'1'});t.after(()=>newClient.close());await newClient.connect(newTransport);
  const resolved=await newClient.callTool({name:'resolve',arguments:{task:'task'}});assert.notEqual(resolved.isError,true);assert.equal(JSON.parse(resolved.content[0].text).observed.state,'claimed');
  const submit=await client.callTool({name:'submit',arguments:{operation:'submit1',task:'task',guardGeneration:2,taskGeneration:1}});assert.equal(JSON.parse(submit.content[0].text).status,'recorded');
+ assert.equal((await client.callTool({name:'resolve',arguments:{task:'task',guardGeneration:2}})).isError,true);
+ const reviewed=await client.callTool({name:'resolve',arguments:{task:'task',guardGeneration:3}});assert.notEqual(reviewed.isError,true);assert.equal(JSON.parse(reviewed.content[0].text).observed.state,'review');
  const rows=Object.values(JSON.parse(readFileSync(join(dir,'snapshot'))));assert(rows.some(r=>r.kind==='review-task-v1'&&r.generation===2&&r.state==='review'));
  const beforeMismatch=readFileSync(join(dir,'snapshot'),'utf8'),writesBeforeMismatch=readFileSync(join(dir,'writes'),'utf8'),journalBeforeMismatch=readFileSync(join(journal,'intent.json'),'utf8');
  assert.deepEqual(JSON.parse(readFileSync(join(journal,'journal.marker'),'utf8')).scope,{endpoint,project,database:'db',table:'review'});

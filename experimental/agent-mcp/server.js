@@ -37,8 +37,8 @@ try {
  const annotations={readOnlyHint:true,destructiveHint:false,openWorldHint:true};
  const continuation=(n)=>({type:'string',minLength:n,maxLength:n,pattern:n===379?'^[A-Za-z0-9_-]{378}[AEIMQUYcgkosw048]$':'^[A-Za-z0-9_-]{720}$'});
  server.setRequestHandler(ListToolsRequestSchema,()=>({tools:[
-  {name:'discover',description:'Read a partial, non-snapshot advisory page. Missing entries do not prove absence.',inputSchema:{type:'object',properties:{continuation:continuation(379)},additionalProperties:false},annotations},
-  {name:'resolve',description:'Inspect bounded historical task versions. State remains unknown and observations are not current.',inputSchema:{type:'object',properties:{task:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$'},continuation:continuation(720)},required:['task'],additionalProperties:false},annotations},
+  {name:'discover',description:'Read a partial, non-snapshot advisory page. Missing entries do not prove absence.',inputSchema:{type:'object',properties:{continuation:continuation(379),guardGeneration:{type:'integer',minimum:0,maximum:999998}},additionalProperties:false},annotations},
+  {name:'resolve',description:'Inspect bounded historical task versions. State remains unknown and observations are not current.',inputSchema:{type:'object',properties:{task:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$'},continuation:continuation(720),guardGeneration:{type:'integer',minimum:0,maximum:999998}},required:['task'],additionalProperties:false},annotations},
   ...(write?['claim','submit'].map(name=>({name,description:'Explicitly dispatch once; unknown outcomes require receipt reconciliation.',inputSchema:{type:'object',properties:{operation:{type:'string'},task:{type:'string'},guardGeneration:{type:'integer'},taskGeneration:{type:'integer'}},required:['operation','task','guardGeneration','taskGeneration'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,openWorldHint:true}})).concat([{name:'reconcile',description:'Reconcile the saved exact intent against an independently authorized receipt.',inputSchema:{type:'object',properties:{currentGuardGeneration:{type:'integer'}},required:['currentGuardGeneration'],additionalProperties:false},annotations:{readOnlyHint:true,destructiveHint:false,openWorldHint:true}}]):[])
  ]}));
  server.setRequestHandler(CallToolRequestSchema,(request,extra)=>{
@@ -47,7 +47,7 @@ try {
    if(write&&['claim','submit','reconcile'].includes(operation))return write(operation,request.params.arguments??{},extra.signal).then(value=>({content:[{type:'text',text:JSON.stringify(value)}]}));
    if(operation!=='discover'&&operation!=='resolve')return unavailable();
    const args=request.params.arguments??{};
-   if(Object.keys(args).some(k=>k!=='continuation'&&(operation!=='resolve'||k!=='task')))return unavailable();
+   if(Object.keys(args).some(k=>k!=='continuation'&&k!=='guardGeneration'&&(operation!=='resolve'||k!=='task')))return unavailable();
    const input=parseInput(Buffer.from(JSON.stringify({session,operation,...args})));
    const {session:ignored,operation:validated,...params}=input;
    return call(validated,params,extra.signal);

@@ -36,8 +36,8 @@ export function validateConfig(args) {
  const handle=Object.freeze({});configs.set(handle,{port,ca,hostname:url.hostname,host:remote?url.host:`127.0.0.1:${port}`,endpoint:o['--endpoint'],actor:o['--actor'],board:o['--board'],guardGeneration:Number(o['--guard'])});return handle;
 }
 function inputSnapshot(value){
- const x=snapshot(value,['session','operation'],['task','continuation']);
- if(typeof x.session!=='string'||!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(x.session)||!['discover','resolve'].includes(x.operation)|| (x.operation==='resolve'?!id(x.task):Object.hasOwn(x,'task')) || (Object.hasOwn(x,'continuation')&&!token(x.continuation,x.operation)))throw Error('input');
+ const x=snapshot(value,['session','operation'],['task','continuation','guardGeneration']);
+ if(typeof x.session!=='string'||!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(x.session)||!['discover','resolve'].includes(x.operation)|| (x.operation==='resolve'?!id(x.task):Object.hasOwn(x,'task')) || (Object.hasOwn(x,'continuation')&&!token(x.continuation,x.operation)) || (Object.hasOwn(x,'guardGeneration')&&(!Number.isSafeInteger(x.guardGeneration)||x.guardGeneration<0||x.guardGeneration>999998)))throw Error('input');
  return x;
 }
 export function parseInput(bytes){
@@ -60,7 +60,7 @@ export function requestReview(handle,input,options={}) {
   let done=false,req,timer;const finish=(error,result)=>{if(done)return;done=true;clearTimeout(timer);bridge.signal?.removeEventListener('abort',abort);bridge.dispose();if(error){req?.destroy();reject(Error('Review unavailable'));}else resolve(result);};
   const abort=()=>finish(true);if(bridge.signal?.aborted){finish(true);return;}bridge.signal?.addEventListener('abort',abort,{once:true});
   timer=setTimeout(()=>finish(true),opts.timeoutMs??10000);
-  const body=JSON.stringify({board:c.board,expectedActor:c.actor,guardGeneration:c.guardGeneration,...(x.operation==='resolve'?{task:x.task}:{}),...(Object.hasOwn(x,'continuation')?{continuation:x.continuation}:{})});
+  const body=JSON.stringify({board:c.board,expectedActor:c.actor,guardGeneration:Object.hasOwn(x,'guardGeneration')?x.guardGeneration:c.guardGeneration,...(x.operation==='resolve'?{task:x.task}:{}),...(Object.hasOwn(x,'continuation')?{continuation:x.continuation}:{})});
   try{req=https.request({hostname:c.hostname,port:c.port,path:x.operation==='discover'?'/review/discovery':'/review/resolve',method:'POST',agent:false,ca:c.ca,rejectUnauthorized:true,headers:{host:c.host,origin:c.endpoint,'sec-fetch-site':'same-origin','sec-fetch-mode':'cors','sec-fetch-dest':'empty','content-type':'application/json','content-length':Buffer.byteLength(body),cookie:`__Host-weftline=${x.session}`}},res=>{
    if(![200,202].includes(res.statusCode)||res.headers['content-type']?.split(';')[0]!=='application/json'){res.destroy();finish(true);return;}
    const chunks=[];let size=0;res.on('data',chunk=>{size+=chunk.length;if(size>65536){res.destroy();finish(true);}else chunks.push(chunk);});res.on('error',()=>finish(true));res.on('aborted',()=>finish(true));res.on('end',()=>{try{const value=parseGuardedJson(Buffer.concat(chunks));if(!validResult(value,c,x,res.statusCode))return finish(true);finish(false,value);}catch{finish(true);}});
