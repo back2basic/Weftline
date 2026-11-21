@@ -27,6 +27,11 @@ const path=x=>typeof x==='string'&&isAbsolute(x)&&!x.includes('\0');
 try {
  const e=process.env;
  const proxy=e.WEFTLINE_REVIEW_PROXY==='1';
+ const readOnly=e.WEFTLINE_REVIEW_READ_ONLY==='1';
+ const scopedAgent=e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES==='1';
+ if(e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES!==undefined&&(!scopedAgent||proxy||readOnly))throw Error('Invalid configuration');
+ if(e.WEFTLINE_REVIEW_READ_ONLY!==undefined&&!readOnly)throw Error('Invalid configuration');
+ if(readOnly&&(proxy||['WEFTLINE_REVIEW_AUTH','WEFTLINE_REVIEW_UI','WEFTLINE_REVIEW_KNOWLEDGE_V2','WEFTLINE_REVIEW_KNOWLEDGE_LIST_V2','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_UI','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_WRITE_UI'].some(k=>e[k]!==undefined)))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_PROXY!==undefined&&!proxy)throw Error('Invalid configuration');
  let publicOrigin,proxySecret,listenPort;
  if(proxy){
@@ -48,7 +53,8 @@ try {
  if(lines.length!==3)throw Error('Invalid credentials');
  for(const line of lines){const i=line.indexOf(':'),name=line.slice(0,i);if(i<1||!['apikey','projectID','endpoint'].includes(name)||Object.hasOwn(values,name))throw Error('Invalid credentials');values[name]=line.slice(i+1).trim();}
  if(values.endpoint!==endpoint||values.projectID!==project||!values.apikey||/\s/.test(values.apikey))throw Error('Invalid credentials');
- const store=createGuardedAppwriteStore({enabled:true,endpoint,project,approvedEndpoint,approvedProject,key:values.apikey,database:e.APPWRITE_DATABASE,table:e.APPWRITE_TABLE}),service=createReviewService({store,board:e.WEFTLINE_REVIEW_BOARD}),discovery=createReviewDiscovery({store,board:e.WEFTLINE_REVIEW_BOARD}),resolution=createReviewResolution({store,board:e.WEFTLINE_REVIEW_BOARD});
+ const backendScope=Object.freeze({endpoint,project,database:e.APPWRITE_DATABASE,table:e.APPWRITE_TABLE});
+ const store=createGuardedAppwriteStore({enabled:true,endpoint,project,approvedEndpoint,approvedProject,key:values.apikey,database:backendScope.database,table:backendScope.table}),service=createReviewService({store,board:e.WEFTLINE_REVIEW_BOARD}),discovery=createReviewDiscovery({store,board:e.WEFTLINE_REVIEW_BOARD}),resolution=createReviewResolution({store,board:e.WEFTLINE_REVIEW_BOARD});
  let active=0,auth;
  const enabledKnowledge=e.WEFTLINE_REVIEW_KNOWLEDGE_V2==='1';
  // Per-listener cap covers fetch plus knowledge response body settlement.
@@ -69,6 +75,7 @@ try {
   const reject=code=>{reply(code,{status:'unavailable'});req.resume();};
   const addr=server.address(),sock=req.socket,count=n=>req.rawHeaders.filter((_,i)=>i%2===0&&req.rawHeaders[i].toLowerCase()===n).length;
   if(!addr||typeof addr==='string')return reject(403);
+  if(readOnly&&(req.method!=='POST'||!['/review/discovery','/review/resolve'].includes(req.url)))return reject(404);
   const expectedOrigin=proxy?publicOrigin:`https://127.0.0.1:${addr.port}`,expectedHost=new URL(expectedOrigin).host;
   if(proxy){
    const names=req.rawHeaders.filter((_,i)=>i%2===0).map(x=>x.toLowerCase());
@@ -84,7 +91,8 @@ try {
   const isAuth=e.WEFTLINE_REVIEW_AUTH==='1'&&['/login','/account','/logout'].includes(req.url);
   const isList=!!knowledgeList&&req.url==='/knowledge/v2/list';
   const isVersioned=!!versioned&&versionedRoutes.has(req.url);
-  if(!isAuth&&!isList&&!isVersioned&&!['/review/genesis','/review/transition','/review/receipt','/review/task','/review/discovery','/review/resolve'].includes(req.url))return reject(404);
+  const isScoped=scopedAgent&&['/review/scoped-transition','/review/scoped-receipt'].includes(req.url);
+  if(!isAuth&&!isList&&!isVersioned&&!isScoped&&!['/review/genesis','/review/transition','/review/receipt','/review/task','/review/discovery','/review/resolve'].includes(req.url))return reject(404);
   if(req.method!==(isAuth&&req.url==='/account'?'GET':'POST'))return reject(405);
   const originOk=count('origin')===1&&req.headers.origin===expectedOrigin||count('origin')===0&&isAuth&&req.url==='/account';
   if(forwarded||count('host')!==1||req.headers.host!==expectedHost||!originOk||count('sec-fetch-site')!==1||req.headers['sec-fetch-site']!=='same-origin'||count('sec-fetch-mode')!==1||req.headers['sec-fetch-mode']!=='cors'||count('sec-fetch-dest')!==1||req.headers['sec-fetch-dest']!=='empty')return reject(403);
@@ -97,13 +105,13 @@ try {
   let checkpoint;
   const controller=new AbortController(),timer=setTimeout(()=>{controller.abort();reply(202,{status:'unknown',...(checkpoint?{consistency:'advisory-non-snapshot',continuation:checkpoint}:{})});if(!req.complete)req.destroy();},10000);
   const disconnect=()=>{if(!res.writableFinished)controller.abort();};res.once('close',disconnect);
-  (async()=>{try{const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>4096)return reject(400);chunks.push(c);}controller.signal.throwIfAborted();let input;try{input=parseGuardedJson(Buffer.concat(chunks));}catch{return reject(400);}if(isVersioned){
+  (async()=>{try{const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>4096)return reject(400);chunks.push(c);}controller.signal.throwIfAborted();let input;try{input=parseGuardedJson(Buffer.concat(chunks));}catch{return reject(400);}let scopeCheck;if(isScoped){const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));if(!exact(input,['scope','intent']))return reject(400);const scope=input.scope;scopeCheck=()=>!!exact(scope,['endpoint','project','database','table'])&&Object.keys(backendScope).every(k=>scope[k]===backendScope[k]);input=input.intent;}if(isVersioned){
    if(!input||typeof input!=='object'||Array.isArray(input)||Object.hasOwn(input,'session')||Object.hasOwn(input,'signal'))return reject(400);
    const method=req.url.slice('/knowledge/versioned/'.length),keys=versionedKeys[method];
    if(!keys.every(k=>Object.hasOwn(input,k))||Object.keys(input).some(k=>!keys.includes(k)&&!((method==='list'||method==='resolve')&&k==='continuation')))return reject(400);
    const result=await versioned[method]({...input,session,signal:controller.signal});
    return reply(result.status==='confirmed'||result.status==='advisory'||result.status==='partial'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);
-  }if(isList){if(!input||typeof input!=='object'||Array.isArray(input)||!Object.hasOwn(input,'boardId')||input.boardId!==e.WEFTLINE_REVIEW_BOARD||!id(input.expectedActor)||Object.keys(input).some(k=>!['boardId','expectedActor','continuation'].includes(k)))return reject(400);const result=await knowledgeList({session,expectedActor:input.expectedActor,signal:controller.signal,...(Object.hasOwn(input,'continuation')?{continuation:input.continuation}:{})});return reply(result.status==='partial'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);}const result=await (req.url==='/review/discovery'?discovery(input,session,controller.signal,value=>{checkpoint=value;}):req.url==='/review/resolve'?resolution(input,session,controller.signal,value=>{checkpoint=value;}):service(req.url.slice('/review/'.length),input,session,controller.signal));const body=Object.fromEntries(Object.entries(result).filter(([k])=>k!=='code'));if(req.url==='/review/discovery'&&result.code===200)Object.assign(body,{actor:input.expectedActor,board:input.board});reply(result.code,body);}catch{reply(202,{status:'unknown'});}finally{clearTimeout(timer);res.removeListener('close',disconnect);active--;}})();
+  }if(isList){if(!input||typeof input!=='object'||Array.isArray(input)||!Object.hasOwn(input,'boardId')||input.boardId!==e.WEFTLINE_REVIEW_BOARD||!id(input.expectedActor)||Object.keys(input).some(k=>!['boardId','expectedActor','continuation'].includes(k)))return reject(400);const result=await knowledgeList({session,expectedActor:input.expectedActor,signal:controller.signal,...(Object.hasOwn(input,'continuation')?{continuation:input.continuation}:{})});return reply(result.status==='partial'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);}const result=await (req.url==='/review/discovery'?discovery(input,session,controller.signal,value=>{checkpoint=value;}):req.url==='/review/resolve'?resolution(input,session,controller.signal,value=>{checkpoint=value;}):service(isScoped?req.url.slice('/review/scoped-'.length):req.url.slice('/review/'.length),input,session,controller.signal,scopeCheck));const body=Object.fromEntries(Object.entries(result).filter(([k])=>k!=='code'));if(req.url==='/review/discovery'&&result.code===200)Object.assign(body,{actor:input.expectedActor,board:input.board});reply(result.code,body);}catch{reply(202,{status:'unknown'});}finally{clearTimeout(timer);res.removeListener('close',disconnect);active--;}})();
  });
  server.headersTimeout=5000;server.requestTimeout=5000;server.on('error',()=>{console.error('Listener unavailable');process.exitCode=1;});server.listen(proxy?listenPort:Number(e.WEFTLINE_REVIEW_PORT),proxy?e.WEFTLINE_REVIEW_HOST:'127.0.0.1',()=>console.log(`Review ${proxy?'proxy HTTP':'experimental TLS'} listener ${proxy?e.WEFTLINE_REVIEW_HOST:'127.0.0.1'}:${server.address().port}`));
 } catch {console.error('Disabled or invalid configuration');process.exitCode=1;}
