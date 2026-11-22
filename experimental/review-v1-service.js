@@ -10,7 +10,7 @@ const titleValid=x=>typeof x==='string' && x.length>0 && x.trim().length>0;
 const fields=['board','expectedActor','guardGeneration','operation','task','taskGeneration','action'];
 export function createReviewService({store,board}) {
  if(!id(board)||!store||!['account','get','transaction'].every(k=>typeof store[k]==='function'))throw Error('Invalid configuration');
- return async function run(route,x,session,signal) {
+ return async function run(route,x,session,signal,scopeCheck) {
   if(route==='task') {
    const keys=['board','expectedActor','guardGeneration','task','taskGeneration'];
    if(!x||typeof x!=='object'||Array.isArray(x)||Object.keys(x).some(k=>!keys.includes(k)&&k!=='creator'&&k!=='operation')||!keys.every(k=>Object.hasOwn(x,k))||(Object.hasOwn(x,'creator')!==Object.hasOwn(x,'operation'))||(Object.hasOwn(x,'creator')&&(!id(x.creator)||!id(x.operation)))||x.board!==board||![x.expectedActor,x.task].every(id)||!Number.isSafeInteger(x.guardGeneration)||x.guardGeneration<0||x.guardGeneration>999998||!Number.isSafeInteger(x.taskGeneration)||x.taskGeneration<0||x.taskGeneration>999999)return {code:400,status:'invalid'};
@@ -50,6 +50,8 @@ export function createReviewService({store,board}) {
    if(!equal(guard,{kind:'review-guard-v1',board,user,generation:current,state:'active',role}))return route==='receipt'?{code:202,status:'unknown'}:{code:403,status:'denied'};
    const successor=await store.get(guardId(board,user,current+1),{signal});check();
    if(successor!==null)return route==='receipt'?{code:202,status:'unknown'}:{code:403,status:'denied'};
+   // Only disclose scope mismatch after authenticating the actor and current guard.
+   if(scopeCheck&&!scopeCheck())return {code:route==='receipt'?202:403,status:'unavailable'};
    const expected={kind:'review-receipt-v1',...Object.fromEntries(fields.map(k=>[k,x[k]])),user,...(Object.hasOwn(x,'title')?{title:x.title}:{})};
    const rid=receiptId(board,user,x.operation),previous=await store.get(rid,{signal});check();
    if(previous!==null)return equal(previous,expected)?{code:200,status:'recorded',receipt:expected}:{code:409,status:'unknown'};
