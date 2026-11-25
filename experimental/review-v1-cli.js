@@ -29,7 +29,7 @@ try {
  const proxy=e.WEFTLINE_REVIEW_PROXY==='1';
  const readOnly=e.WEFTLINE_REVIEW_READ_ONLY==='1';
  const scopedAgent=e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES==='1';
- if(e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES!==undefined&&(!scopedAgent||proxy||readOnly))throw Error('Invalid configuration');
+ if(e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES!==undefined&&(!scopedAgent||readOnly))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_READ_ONLY!==undefined&&!readOnly)throw Error('Invalid configuration');
  if(readOnly&&(proxy||['WEFTLINE_REVIEW_AUTH','WEFTLINE_REVIEW_UI','WEFTLINE_REVIEW_KNOWLEDGE_V2','WEFTLINE_REVIEW_KNOWLEDGE_LIST_V2','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_UI','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_WRITE_UI'].some(k=>e[k]!==undefined)))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_PROXY!==undefined&&!proxy)throw Error('Invalid configuration');

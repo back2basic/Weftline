@@ -3,12 +3,13 @@ import https from 'node:https';
 import {readFileSync} from 'node:fs';
 import {createJournal} from './intent-journal.js';
 import {parseGuardedJson} from '../guarded-strict-json.js';
+import {validateConfig} from '../review-agent-connector.js';
 
 export function createWriteAdapter({args,session,journalDir,backendScope}) {
- const options=Object.fromEntries(Array.from({length:5},(_,i)=>[args[1+i*2],args[2+i*2]]));
+ validateConfig(args);
+ const offset=args[1]==='--remote-https'?2:1;
+ const options=Object.fromEntries(Array.from({length:5},(_,i)=>[args[offset+i*2],args[offset+1+i*2]]));
  const origin=options['--endpoint'];
- // Write mode intentionally excludes remote HTTPS until separately reviewed.
- if(!/^https:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(origin))throw Error('configuration');
  const url=new URL(origin),ca=readFileSync(options['--ca']);
  const actor=options['--actor'],board=options['--board'],journal=createJournal(journalDir,backendScope);
  const id=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(x);
@@ -20,7 +21,7 @@ export function createWriteAdapter({args,session,journalDir,backendScope}) {
    let done=false,req,timer;const finish=x=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);if(!x)req?.destroy();resolve(x);};
    const abort=()=>finish(null);if(signal?.aborted)return finish(null);signal?.addEventListener('abort',abort,{once:true});timer=setTimeout(abort,10000);
    const body=JSON.stringify({scope:backendScope,intent});
-   try{req=https.request({hostname:'127.0.0.1',port:Number(url.port),path:'/review/scoped-'+route,method:'POST',agent:false,ca,rejectUnauthorized:true,headers:{host:url.host,origin,'sec-fetch-site':'same-origin','sec-fetch-mode':'cors','sec-fetch-dest':'empty','content-type':'application/json','content-length':Buffer.byteLength(body),cookie:`__Host-weftline=${session}`}},res=>{
+   try{req=https.request({hostname:url.hostname,port:Number(url.port||443),path:'/review/scoped-'+route,method:'POST',agent:false,ca,rejectUnauthorized:true,headers:{host:url.host,origin,'sec-fetch-site':'same-origin','sec-fetch-mode':'cors','sec-fetch-dest':'empty','content-type':'application/json','content-length':Buffer.byteLength(body),cookie:`__Host-weftline=${session}`}},res=>{
     if(![200,201].includes(res.statusCode)||res.headers['content-type']?.split(';')[0]!=='application/json'){res.destroy();return finish(null);}
     let size=0;const chunks=[];res.on('data',c=>{size+=c.length;if(size>65536){res.destroy();finish(null);}else chunks.push(c);});res.on('error',abort);res.on('aborted',abort);res.on('end',()=>{try{const value=parseGuardedJson(Buffer.concat(chunks));if(!exact(value,['status','receipt']))return finish(null);finish({code:res.statusCode,...value});}catch{finish(null);}});
    });req.on('error',abort);req.end(body);}catch{finish(null);}

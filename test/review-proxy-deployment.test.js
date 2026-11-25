@@ -32,6 +32,10 @@ test('opt-in proxy listener gates and serves synthetic versioned workflow', {tim
  const draft={expectedActor:'alice',documentId:'doc',operationId:'00000000000000000000000000000001',title:'Title',html:'Body'};
  assert.equal(JSON.parse((await send('/knowledge/versioned/create',{body:draft,headers:{cookie}})).text).status,'confirmed');
  assert.equal(JSON.parse((await send('/knowledge/versioned/read',{body:{expectedActor:'alice',documentId:'doc',generation:0},headers:{cookie}})).text).version.html,'Body');
+ const otherAgent=await send('/knowledge/versioned/read',{body:{expectedActor:'bob',documentId:'doc',generation:0},headers:{cookie:'__Host-weftline=bob'}});
+ assert.equal(otherAgent.status,200);const shared=JSON.parse(otherAgent.text);assert.equal(shared.status,'advisory');assert.equal(shared.version.html,'Body');assert.equal(shared.version.creator,'alice');
+ const outsider=await send('/knowledge/versioned/read',{body:{expectedActor:'outsider',documentId:'doc',generation:0},headers:{cookie:'__Host-weftline=outsider'}});
+ assert.equal(outsider.status,403);assert.equal(JSON.parse(outsider.text).status,'denied');assert.equal(outsider.text.includes('Body'),false);
  const before=(await provider.control('metrics')).requests.length;
  assert.equal((await send('/knowledge/versioned/read',{body:{expectedActor:'alice',documentId:'doc',generation:0},headers:{cookie,origin:'https://evil.example'}})).status,403);
  assert.equal((await send('/knowledge/versioned/read',{body:{expectedActor:'alice',documentId:'doc',generation:0},headers:{cookie,'x-forwarded-for':'1.2.3.4'}})).status,403);
