@@ -98,6 +98,97 @@ test('MCP protocol validation does not reflect untrusted extension keys',{timeou
  const output=await new Promise((resolve,reject)=>{let buffer='';const timer=setTimeout(()=>reject(Error('no response')),5000);child.stdout.on('data',x=>{buffer+=x.toString();if(buffer.includes('\n')){clearTimeout(timer);resolve(buffer.slice(0,buffer.indexOf('\n')));}});child.once('exit',()=>{clearTimeout(timer);reject(Error('server exited'));});});
  const response=JSON.parse(output);assert.equal(response.id,1);assert.equal(typeof response.error.code,'number');assert.equal(response.error.message,'Request unavailable.');assert.equal(Object.hasOwn(response.error,'data'),false);assert.doesNotMatch(output+stderr,/synthetic-secret-marker/);
 });
+async function awaitClosedWithin(closed,ms){
+ let timer;try{return await Promise.race([closed,new Promise(resolve=>{timer=setTimeout(()=>resolve(null),ms);})]);}finally{clearTimeout(timer);}
+}
+test('malformed JSON does not expose input or prevent a following ping',{timeout:10000},async t=>{
+ const f=await fixture(t),args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];
+ const child=spawn(process.execPath,args,{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice'},stdio:['pipe','pipe','pipe']});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));t.after(()=>stopStdioChild(child,closed));child.stdin.on('error',()=>{});
+ let output='',stderr='';child.stdout.on('data',x=>output+=x);child.stderr.on('data',x=>stderr+=x);
+ child.stdin.write('{"synthetic-secret-invalid-json":\n'+JSON.stringify({jsonrpc:'2.0',id:7,method:'ping'})+'\n');
+ const until=performance.now()+4000;while(!output.includes('\n')&&performance.now()<until&&child.exitCode===null)await new Promise(r=>setTimeout(r,10));
+ assert.deepEqual(JSON.parse(output.trim()),{jsonrpc:'2.0',id:7,result:{}});assert.doesNotMatch(output+stderr,/synthetic-secret-invalid-json/);
+ child.stdin.end();assert.deepEqual(await awaitClosedWithin(closed,3000),{code:0,signal:null});
+});
+test('closed stdout retains the SDK stream-error termination behavior',{timeout:10000},async t=>{
+ const f=await fixture(t),args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];
+ const child=spawn(process.execPath,args,{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice'},stdio:['pipe','pipe','pipe']});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));t.after(()=>stopStdioChild(child,closed));child.stdin.on('error',()=>{});
+ let stderr='';child.stderr.on('data',x=>stderr+=x);
+ const ready=new Promise(resolve=>child.stdout.once('data',resolve));
+ child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'ping'})+'\n');await ready;child.stdout.destroy();
+ child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:2,method:'ping'})+'\n');
+ const outcome=await awaitClosedWithin(closed,3000);
+ assert.deepEqual(outcome,{code:1,signal:null});assert.match(stderr,/EPIPE/);assert.doesNotMatch(stderr,/WEFTLINE_AGENT_SESSION|alice/);
+});
+test('watched output preserves SDK send and stream error behavior',{timeout:10000},async()=>{
+ const {StdioServerTransport}=await import('@modelcontextprotocol/sdk/server/stdio.js');
+ const {Writable}=await import('node:stream');
+ const source=readFileSync(server,'utf8');
+ const definition=source.slice(source.indexOf('class RedactedTransport '),source.indexOf('\n\ntry {'));
+ const Watched=new Function('StdioServerTransport',definition+';return RedactedTransport')(StdioServerTransport);
+ async function run(Transport,highWaterMark,fail){
+  const seen=[];let data='';
+  const out=new Writable({highWaterMark,write(chunk,encoding,callback){data+=chunk;setTimeout(()=>callback(fail?Error('synthetic-stream-error'):null),20);}});
+  out.on('error',error=>seen.push(error.message));
+  const transport=new Transport(process.stdin,out,{maxBufferSize:65536});let settled=false,rejected=false;
+  transport.send({jsonrpc:'2.0',id:1,result:{}}).then(()=>{settled=true;},()=>{settled=true;rejected=true;});
+  await new Promise(resolve=>setTimeout(resolve,5));const before=settled;
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const result={before,settled,rejected,seen,data:JSON.parse(data),drainListeners:out.listenerCount('drain')};
+  out.destroy();return result;
+ }
+ for(const hwm of [1,65536])for(const fail of [false,true]){
+  const original=await run(StdioServerTransport,hwm,fail),watched=await run(Watched,hwm,fail);
+  assert.deepEqual(watched,original,`SDK semantics changed for highWaterMark=${hwm}, error=${fail}`);
+ }
+});
+test('expired callback is not accepted when its timer was delayed',{timeout:7000},()=>{
+ const script=`import {readFileSync} from 'node:fs';import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
+const source=readFileSync(${JSON.stringify(server)},'utf8');const definition=source.slice(source.indexOf('class RedactedTransport '),source.indexOf('\\n\\ntry {'));
+const T=new Function('StdioServerTransport',definition+';return RedactedTransport')(StdioServerTransport);
+const out={write(data,done){setTimeout(()=>{const until=performance.now()+300;while(performance.now()<until){}done();},1900);return true},once(){}};
+new T(process.stdin,out,{}).send({jsonrpc:'2.0',id:1,result:{}});`;
+ const r=spawnSync(process.execPath,['--input-type=module','-e',script],{cwd:resolve(root,'experimental/agent-mcp'),env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},encoding:'utf8',timeout:5000});
+ assert.equal(r.error,undefined);assert.equal(r.status,74);assert.equal(r.signal,null);
+});
+test('a synchronous drain registration error releases its waiter slot',{timeout:5000},()=>{
+ const script=`import {readFileSync} from 'node:fs';import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
+const source=readFileSync(${JSON.stringify(server)},'utf8');const definition=source.slice(source.indexOf('class RedactedTransport '),source.indexOf('\\n\\ntry {'));
+const T=new Function('StdioServerTransport',definition+';return RedactedTransport')(StdioServerTransport);
+const out={write(data,done){done();return false},once(){throw Error('registration')}};const t=new T(process.stdin,out,{});
+for(let i=0;i<2050;i++){try{await t.send({jsonrpc:'2.0',id:i,result:{}});process.exit(2)}catch(e){if(e.message!=='registration')process.exit(3)}}`;
+ const r=spawnSync(process.execPath,['--input-type=module','-e',script],{cwd:resolve(root,'experimental/agent-mcp'),env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},encoding:'utf8',timeout:4000});
+ assert.equal(r.error,undefined);assert.equal(r.status,0);assert.equal(r.signal,null);
+});
+test('completed drain cycles release listener slots and watchdog timers',{timeout:5000},()=>{
+ const script=`import {readFileSync} from 'node:fs';import {EventEmitter} from 'node:events';import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
+const source=readFileSync(${JSON.stringify(server)},'utf8');const definition=source.slice(source.indexOf('class RedactedTransport '),source.indexOf('\\n\\ntry {'));
+const T=new Function('StdioServerTransport',definition+';return RedactedTransport')(StdioServerTransport);
+class Output extends EventEmitter{write(data,done){setImmediate(()=>{done();this.emit('drain')});return false}};const output=new Output();const t=new T(process.stdin,output,{});
+for(let i=0;i<2050;i++){await t.send({jsonrpc:'2.0',id:i,result:{}});if(output.listenerCount('drain'))process.exit(2)}`;
+ const r=spawnSync(process.execPath,['--input-type=module','-e',script],{cwd:resolve(root,'experimental/agent-mcp'),env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},encoding:'utf8',timeout:4000});
+ assert.equal(r.error,undefined);assert.equal(r.status,0);assert.equal(r.signal,null);
+});
+test('pending SDK drain waiters are bounded even as write callbacks complete',{timeout:10000},()=>{
+ const script=`import {readFileSync} from 'node:fs';import {EventEmitter} from 'node:events';import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
+const source=readFileSync(${JSON.stringify(server)},'utf8');const definition=source.slice(source.indexOf('class RedactedTransport '),source.indexOf('\\n\\ntry {'));
+const T=new Function('StdioServerTransport',definition+';return RedactedTransport')(StdioServerTransport);
+class Output extends EventEmitter{write(data,done){setImmediate(done);return false}};const output=new Output();output.setMaxListeners(0);const transport=new T(process.stdin,output,{});
+for(let i=0;i<2049;i++){transport.send({jsonrpc:'2.0',id:i,result:{}});await new Promise(resolve=>setImmediate(resolve));}`;
+ const r=spawnSync(process.execPath,['--input-type=module','-e',script],{cwd:resolve(root,'experimental/agent-mcp'),env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},encoding:'utf8',timeout:5000});
+ assert.equal(r.error,undefined);assert.equal(r.status,75);assert.equal(r.signal,null);
+});
+test('pending callback limit exits 75 before retaining another callback',{timeout:10000},()=>{
+ const script=`import {readFileSync} from 'node:fs';import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
+const source=readFileSync(${JSON.stringify(server)},'utf8');const definition=source.slice(source.indexOf('class RedactedTransport '),source.indexOf('\\n\\ntry {'));
+const T=new Function('StdioServerTransport',definition+';return RedactedTransport')(StdioServerTransport);
+const out={write(){return true},once(){}};const transport=new T(process.stdin,out,{});
+for(let i=0;i<2049;i++)transport.send({jsonrpc:'2.0',id:i,result:{}});`;
+ const r=spawnSync(process.execPath,['--input-type=module','-e',script],{cwd:resolve(root,'experimental/agent-mcp'),env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},encoding:'utf8',timeout:5000});
+ assert.equal(r.error,undefined);assert.equal(r.status,75);assert.equal(r.signal,null);
+});
 test('output queue threshold checks the actual transport before each send',{timeout:10000},()=>{
  // Evaluate the exact class definition from server.js without starting its CLI.
  // The SDK transport and its send implementation remain real; only the observed
@@ -178,6 +269,77 @@ test('stdio teardown escalates and awaits the exact stubborn child close',{timeo
  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('child ready timeout')),2000);child.stdout.once('data',()=>{clearTimeout(timer);resolve();});});
  const result=await stopStdioChild(child,closed);
  assert.deepEqual(result,{code:null,signal:'SIGKILL'});
+});
+test('last backpressured stdio send exits without another request',{timeout:15000},async t=>{
+ const f=await fixture(t),probe=join(f.dir,'observe-write.cjs');
+ // Observe the real write result without changing it or bypassing the guard.
+ writeFileSync(probe,"const out=process.stdout,write=out.write;let n=0;out.write=function(chunk,...args){const id=++n,original=typeof args.at(-1)==='function'?args.pop():null;const result=write.call(this,chunk,...args,function(...values){process.stderr.write('DONE '+id+'\\n');if(original)original.apply(this,values);});process.stderr.write('WRITE '+id+' '+result+'\\n');return result;};");
+ const args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];
+ const child=spawn(process.execPath,args,{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice',NODE_OPTIONS:`--require ${probe}`},stdio:['pipe','pipe','pipe']});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+ t.after(()=>stopStdioChild(child,closed));child.stdin.on('error',()=>{});
+ let stderr='';child.stderr.on('data',chunk=>stderr+=chunk);
+ let output='';child.stdout.on('data',chunk=>output+=chunk);
+ child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'test',version:'1'}}})+'\n');
+ const wait=async(predicate,ms)=>{const end=performance.now()+ms;while(!predicate()&&performance.now()<end&&child.exitCode===null)await new Promise(r=>setTimeout(r,10));return predicate();};
+ assert.ok(await wait(()=>output.includes('\n'),5000),'initial response');child.stdout.pause();
+ let blocked=false;
+ for(let i=0;i<50&&!blocked&&child.exitCode===null;i++){
+  const id=i+2;
+  child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:String(i).padStart(60000,'x'),method:'ping'})+'\n');
+  assert.ok(await wait(()=>stderr.includes(`WRITE ${id} `),1000),'write observed');
+  await new Promise(r=>setTimeout(r,100));
+  blocked=stderr.includes(`WRITE ${id} false\n`)&&!stderr.includes(`DONE ${id}\n`);
+ }
+ assert.ok(blocked,'the last write must return false and remain incomplete');
+ assert.ok(await wait(()=>child.exitCode!==null||child.signalCode!==null,4000),'last send must not remain stuck indefinitely');
+ assert.equal(child.exitCode,74);assert.equal(child.signalCode,null);
+});
+test('last accepted small stdio write cannot strand transport close',{timeout:15000},async t=>{
+ const f=await fixture(t),probe=join(f.dir,'observe-small-write.mjs');
+ writeFileSync(probe,`import {StdioServerTransport} from ${JSON.stringify(new URL('../node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js',import.meta.url).href)};\nconst close=StdioServerTransport.prototype.close;StdioServerTransport.prototype.close=function(...args){process.stderr.write('INPUT_CLOSED\\n');return close.apply(this,args);};\nconst out=process.stdout,write=out.write;let n=0;out.write=function(chunk,...args){const id=++n,original=typeof args.at(-1)==='function'?args.pop():null;const result=write.call(this,chunk,...args,function(...values){process.stderr.write('DONE '+id+'\\n');if(original)original.apply(this,values);});if(result&&out.writableLength>0)process.stderr.write('PENDING_SMALL '+id+'\\n');return result;};`);
+ const args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];
+ const child=spawn(process.execPath,args,{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice',NODE_OPTIONS:`--import ${probe}`},stdio:['pipe','pipe','pipe']});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));t.after(()=>stopStdioChild(child,closed));child.stdin.on('error',()=>{});
+ let stderr='',output='';child.stderr.on('data',chunk=>stderr+=chunk);child.stdout.on('data',chunk=>output+=chunk);
+ const wait=async(predicate,ms)=>{const end=performance.now()+ms;while(!predicate()&&performance.now()<end&&child.exitCode===null)await new Promise(r=>setTimeout(r,5));return predicate();};
+ child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'test',version:'1'}}})+'\n');
+ assert.ok(await wait(()=>output.includes('\n'),5000));child.stdout.pause();
+ for(let i=0;i<1000&&!stderr.includes('PENDING_SMALL')&&child.exitCode===null;i++){
+  child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:String(i).padStart(1024,'x'),method:'ping'})+'\n');await new Promise(r=>setTimeout(r,5));
+ }
+ const match=stderr.match(/PENDING_SMALL (\d+)\n/);assert.ok(match,'a small write must be queued but accepted');
+ await new Promise(resolve=>setTimeout(resolve,100));
+ assert.ok(!stderr.includes(`DONE ${match[1]}\n`),'the accepted write must still be incomplete');
+ // An oversized unterminated input triggers the SDK buffer-error close.
+ child.stdin.write('x'.repeat(65537));
+ assert.ok(await wait(()=>stderr.includes('INPUT_CLOSED'),2000),'SDK must close after input overflow');
+ assert.ok(await wait(()=>child.exitCode!==null||child.signalCode!==null,4000),'input close must not leave accepted output permanently pending');
+ assert.equal(child.exitCode,74);assert.equal(child.signalCode,null);
+});
+test('a genuinely blocked output recovers and watchdog cleanup permits normal shutdown',{timeout:15000},async t=>{
+ const f=await fixture(t),probe=join(f.dir,'observe-recovery.cjs');
+ writeFileSync(probe,"const out=process.stdout,write=out.write;let n=0;out.write=function(chunk,...args){const id=++n,original=typeof args.at(-1)==='function'?args.pop():null;const result=write.call(this,chunk,...args,function(...values){process.stderr.write('DONE '+id+'\\n');if(original)original.apply(this,values);});process.stderr.write('WRITE '+id+' '+result+'\\n');return result;};");
+ const args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];
+ const child=spawn(process.execPath,args,{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice',NODE_OPTIONS:`--require ${probe}`},stdio:['pipe','pipe','pipe']});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));t.after(()=>stopStdioChild(child,closed));child.stdin.on('error',()=>{});
+ let stderr='',buffer='',messages=[];child.stderr.on('data',chunk=>stderr+=chunk);child.stdout.on('data',chunk=>{buffer+=chunk;let n;while((n=buffer.indexOf('\n'))!==-1){messages.push(JSON.parse(buffer.slice(0,n)));buffer=buffer.slice(n+1);}});
+ const wait=async(predicate,ms)=>{const end=performance.now()+ms;while(!predicate()&&performance.now()<end&&child.exitCode===null)await new Promise(r=>setTimeout(r,10));return predicate();};
+ child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'test',version:'1'}}})+'\n');
+ assert.ok(await wait(()=>messages.length===1,5000));child.stdout.pause();
+ let blocked=false,sent=0;
+ for(let i=0;i<50&&!blocked&&child.exitCode===null;i++){
+  const id=i+2;sent++;
+  child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:String(i).padStart(60000,'x'),method:'ping'})+'\n');
+  assert.ok(await wait(()=>stderr.includes(`WRITE ${id} `),1000));await new Promise(r=>setTimeout(r,100));
+  blocked=stderr.includes(`WRITE ${id} false\n`)&&!stderr.includes(`DONE ${id}\n`);
+ }
+ assert.ok(blocked,'a real write must still be pending');child.stdout.resume();
+ assert.ok(await wait(()=>messages.length===sent+1,1000),'all queued responses arrive after recovery');
+ await new Promise(r=>setTimeout(r,2300));assert.equal(child.exitCode,null,'no stale watchdog may fire');
+ child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:999,method:'ping'})+'\n');
+ assert.ok(await wait(()=>messages.some(m=>m.id===999),1000),'server remains usable');
+ child.stdin.end();assert.deepEqual(await awaitClosedWithin(closed,3000),{code:0,signal:null});
 });
 test('MCP closes a client that floods requests without reading responses',{timeout:15000},async t=>{
  const f=await fixture(t),args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];

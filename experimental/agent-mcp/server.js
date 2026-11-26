@@ -7,6 +7,36 @@ import {statSync} from 'node:fs';
 import {deriveHandoffIds} from './handoff-id.js';
 
 class RedactedTransport extends StdioServerTransport {
+ constructor(stdin,stdout,options){
+  // Track completion without replacing the SDK's send promise. Bound its drain
+  // waiters separately; one timer follows the oldest pending write callback.
+  const pending=new Map();let timer=null,drainWaiters=0;
+  const schedule=()=>{
+   if(timer!==null){clearTimeout(timer);timer=null;}
+   const first=pending.values().next();
+   if(!first.done)timer=setTimeout(()=>process.exit(74),Math.max(1,Math.ceil(first.value+2000-performance.now())));
+  };
+  const output={
+   write(data){
+    if(pending.size>=2048)process.exit(75);
+    const key={};pending.set(key,performance.now());if(pending.size===1)schedule();
+    const done=()=>{
+     const first=pending.values().next();
+     if(!first.done&&performance.now()>=first.value+2000)process.exit(74);
+     if(pending.delete(key))schedule();
+    };
+    try{return stdout.write(data,done);}catch(error){done();throw error;}
+   },
+   once(event,listener){
+    if(event!=='drain')return stdout.once(event,listener);
+    if(drainWaiters>=2048)process.exit(75);
+    drainWaiters++;
+    try{return stdout.once(event,function(...args){drainWaiters--;listener.apply(this,args);});}
+    catch(error){drainWaiters--;throw error;}
+   }
+  };
+  super(stdin,output,options);
+ }
  send(message){
   // Fail closed rather than retaining unbounded queued writes for a non-reading client.
   if(process.stdout.writableLength>65536)process.exit(73);
