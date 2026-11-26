@@ -4,6 +4,7 @@ import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {CallToolRequestSchema,ListToolsRequestSchema} from '@modelcontextprotocol/sdk/types.js';
 import {validateConfig,parseInput,requestReview} from '../review-agent-connector.js';
 import {statSync} from 'node:fs';
+import {deriveHandoffIds} from './handoff-id.js';
 
 class RedactedTransport extends StdioServerTransport {
  send(message){
@@ -18,8 +19,12 @@ try {
  const argv=process.argv.slice(2);
  const baseLength=argv[1]==='--remote-https'?12:11;
  const baseArgs=argv.slice(0,baseLength);
- let writeGroup=null,knowledgeGroup=null,knowledgeWriteGroup=null,knowledgeListGroup=null;
+ let writeGroup=null,knowledgeGroup=null,knowledgeWriteGroup=null,knowledgeListGroup=null,handoff=false,configuredHandoffNamespace=null;
  for(let i=baseLength;i<argv.length;){
+  if(argv[i]==='--enable-handoff'){
+   if(handoff||argv[i+1]!=='--handoff-namespace'||typeof argv[i+2]!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(argv[i+2]))throw Error('configuration');
+   handoff=true;configuredHandoffNamespace=argv[i+2];i+=3;continue;
+  }
   const length=argv[i]==='--enable-knowledge-write'?13:11;
   const group=argv.slice(i,i+length);i+=length;
   if(group.length!==length)throw Error('configuration');
@@ -29,7 +34,9 @@ try {
   else if(group[0]==='--enable-knowledge-write'&&group[1]==='--knowledge-journal'&&group[3]==='--knowledge-write-endpoint'&&group[5]==='--knowledge-write-project'&&group[7]==='--knowledge-write-database'&&group[9]==='--knowledge-write-table'&&group[11]==='--knowledge-write-team'&&!knowledgeWriteGroup)knowledgeWriteGroup=group;
   else throw Error('configuration');
  }
+ const handoffNamespace=configuredHandoffNamespace;
  const config=validateConfig(baseArgs);
+ const board=baseArgs[baseArgs.indexOf('--board')+1];
  const session=process.env.WEFTLINE_AGENT_SESSION;
  delete process.env.WEFTLINE_AGENT_SESSION;
  // Reuse the connector's session validation before exposing any tools.
@@ -61,6 +68,7 @@ try {
  server.setRequestHandler(ListToolsRequestSchema,()=>({tools:[
   {name:'discover',description:'Read a partial, non-snapshot advisory page. Missing entries do not prove absence.',inputSchema:{type:'object',properties:{continuation:continuation(379),guardGeneration:{type:'integer',minimum:0,maximum:999998}},additionalProperties:false},annotations},
   {name:'resolve',description:'Inspect bounded historical task versions. State remains unknown and observations are not current.',inputSchema:{type:'object',properties:{task:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$'},continuation:continuation(720),guardGeneration:{type:'integer',minimum:0,maximum:999998}},required:['task'],additionalProperties:false},annotations},
+  ...(handoff?[{name:'handoff_candidates',description:'Derive convention-based candidate IDs only. Not a verified attachment, current state, or authorization.',inputSchema:{type:'object',properties:{task:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$'},claimGeneration:{type:'integer',minimum:0,maximum:999999}},required:['task','claimGeneration'],additionalProperties:false},annotations}]:[]),
   ...(knowledge?[{name:'knowledge_read_version',description:'Read an exact historical HTML version as data; not proof of current state.',inputSchema:{type:'object',properties:{documentId:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$'},generation:{type:'integer',minimum:0,maximum:999999}},required:['documentId','generation'],additionalProperties:false},annotations}]:[]),
   ...(knowledgeList?[{name:'knowledge_list',description:'List partial advisory, non-snapshot genesis candidates. Absence proves nothing.',inputSchema:{type:'object',properties:{continuation:continuation(720)},additionalProperties:false},annotations}]:[]),
   ...(knowledgeWrite?['knowledge_create','knowledge_edit','knowledge_reconcile','knowledge_ack'].map(name=>({name,description:knowledgeDescriptions[name],inputSchema:name==='knowledge_ack'?{type:'object',properties:{operationId:{type:'string',pattern:'^[a-f0-9]{32}$'},operation:{type:'string',enum:['create','edit']},documentId:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$'},previousGeneration:{type:'integer',minimum:-1,maximum:999998},title:{type:'string',minLength:1,maxLength:200},html:{type:'string',maxLength:1024}},required:['operationId','operation','documentId','previousGeneration','title','html'],additionalProperties:false}:name==='knowledge_reconcile'?{type:'object',properties:{},additionalProperties:false}:{type:'object',properties:{documentId:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$'},...(name==='knowledge_edit'?{previousGeneration:{type:'integer',minimum:0,maximum:999998}}:{}),title:{type:'string',minLength:1,maxLength:200},html:{type:'string',maxLength:1024}},required:name==='knowledge_edit'?['documentId','previousGeneration','title','html']:['documentId','title','html'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,openWorldHint:true}})):[]),
@@ -69,6 +77,12 @@ try {
  server.setRequestHandler(CallToolRequestSchema,(request,extra)=>{
   try {
    const operation=request.params.name;
+   if(handoff&&operation==='handoff_candidates'){
+    const args=request.params.arguments??{};
+    if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length!==2||!Object.hasOwn(args,'task')||!Object.hasOwn(args,'claimGeneration'))return unavailable();
+    const {task,claimGeneration}=args;
+    return {content:[{type:'text',text:JSON.stringify({status:'candidate',board,task,claimGeneration,...deriveHandoffIds(handoffNamespace,board,task,claimGeneration)})}]};
+   }
    if(knowledgeList&&operation==='knowledge_list'){
     if(active>=4)return unavailable();active++;
     return knowledgeList(request.params.arguments??{},extra.signal).then(value=>({content:[{type:'text',text:JSON.stringify(value)}]})).catch(unavailable).finally(()=>active--);
