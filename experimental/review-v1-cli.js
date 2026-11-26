@@ -30,8 +30,10 @@ try {
  const readOnly=e.WEFTLINE_REVIEW_READ_ONLY==='1';
  const scopedAgent=e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES==='1';
  const scopedKnowledge=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ==='1';
+ const scopedKnowledgeWrite=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_WRITE==='1';
  if(e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES!==undefined&&(!scopedAgent||readOnly))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ!==undefined&&(!scopedKnowledge||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'))throw Error('Invalid configuration');
+ if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_WRITE!==undefined&&(!scopedKnowledgeWrite||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_WRITE_UI!==undefined))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_READ_ONLY!==undefined&&!readOnly)throw Error('Invalid configuration');
  if(readOnly&&(proxy||['WEFTLINE_REVIEW_AUTH','WEFTLINE_REVIEW_UI','WEFTLINE_REVIEW_KNOWLEDGE_V2','WEFTLINE_REVIEW_KNOWLEDGE_LIST_V2','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_UI','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_WRITE_UI'].some(k=>e[k]!==undefined)))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_PROXY!==undefined&&!proxy)throw Error('Invalid configuration');
@@ -62,7 +64,7 @@ try {
  // Per-listener cap covers fetch plus knowledge response body settlement.
  const knowledgeGate=boundedKnowledgeTransport(globalThis.fetch);
  const knowledgeTransport=knowledgeGate.transport;
- const versioned=e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED==='1'?createVersionedKnowledgeComposition({enabled:true,endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,database:e.WEFTLINE_KNOWLEDGE_VERSIONED_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_VERSIONED_TABLE_ID,legacyDatabase:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,legacyTable:e.WEFTLINE_KNOWLEDGE_TABLE_ID,boardDatabase:e.APPWRITE_DATABASE,boardTable:e.APPWRITE_TABLE,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,key:values.apikey,maxPayloadBytes:Number(e.WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES),transport:globalThis.fetch}):null;
+ const versioned=e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED==='1'?createVersionedKnowledgeComposition({enabled:true,scopedWrite:scopedKnowledgeWrite,endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,database:e.WEFTLINE_KNOWLEDGE_VERSIONED_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_VERSIONED_TABLE_ID,legacyDatabase:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,legacyTable:e.WEFTLINE_KNOWLEDGE_TABLE_ID,boardDatabase:e.APPWRITE_DATABASE,boardTable:e.APPWRITE_TABLE,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,key:values.apikey,maxPayloadBytes:Number(e.WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES),transport:globalThis.fetch}):null;
  const knowledge=enabledKnowledge?createKnowledgeV2Adapter({enabled:true,endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,database:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_TABLE_ID,key:values.apikey,knowledgePayloadMaxBytes:Number(e.WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES),transport:knowledgeTransport}):null;
  const knowledgeList=e.WEFTLINE_REVIEW_KNOWLEDGE_LIST_V2==='1'?createAppwriteKnowledgeV2Discovery({endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,database:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_TABLE_ID,key:values.apikey}):null;
  // Listing has its own four-slot transport gate, but shares request admission.
@@ -93,7 +95,9 @@ try {
   const isAuth=e.WEFTLINE_REVIEW_AUTH==='1'&&['/login','/account','/logout'].includes(req.url);
   const isList=!!knowledgeList&&req.url==='/knowledge/v2/list';
   const isScopedKnowledge=!!versioned&&scopedKnowledge&&req.url==='/knowledge/versioned/scoped-read';
-  const isVersioned=!!versioned&&(versionedRoutes.has(req.url)||isScopedKnowledge);
+  const scopedWriteMethod=!!versioned&&scopedKnowledgeWrite&&['create','edit','reconcile'].find(x=>req.url==='/knowledge/versioned/scoped-'+x);
+  if(scopedKnowledgeWrite&&['/knowledge/versioned/create','/knowledge/versioned/edit','/knowledge/versioned/reconcile'].includes(req.url))return reject(404);
+  const isVersioned=!!versioned&&(versionedRoutes.has(req.url)||isScopedKnowledge||scopedWriteMethod);
   const isScoped=scopedAgent&&['/review/scoped-transition','/review/scoped-receipt'].includes(req.url);
   if(!isAuth&&!isList&&!isVersioned&&!isScoped&&!['/review/genesis','/review/transition','/review/receipt','/review/task','/review/discovery','/review/resolve'].includes(req.url))return reject(404);
   if(req.method!==(isAuth&&req.url==='/account'?'GET':'POST'))return reject(405);
@@ -109,6 +113,13 @@ try {
   const controller=new AbortController(),timer=setTimeout(()=>{controller.abort();reply(202,{status:'unknown',...(checkpoint?{consistency:'advisory-non-snapshot',continuation:checkpoint}:{})});if(!req.complete)req.destroy();},10000);
   const disconnect=()=>{if(!res.writableFinished)controller.abort();};res.once('close',disconnect);
   (async()=>{try{const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>4096)return reject(400);chunks.push(c);}controller.signal.throwIfAborted();let input;try{input=parseGuardedJson(Buffer.concat(chunks));}catch{return reject(400);}let scopeCheck;if(isScoped){const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));if(!exact(input,['scope','intent']))return reject(400);const scope=input.scope;scopeCheck=()=>!!exact(scope,['endpoint','project','database','table'])&&Object.keys(backendScope).every(k=>scope[k]===backendScope[k]);input=input.intent;}if(isVersioned){
+   if(scopedWriteMethod){
+    const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
+    if(!exact(input,['scope','intent'])||!exact(input.intent,versionedKeys[scopedWriteMethod]))return reject(400);
+    const method=scopedWriteMethod+'Scoped';
+    const result=await versioned[method]({...input.intent,scope:input.scope,session,signal:controller.signal});
+    return reply(result.status==='confirmed'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);
+   }
    if(isScopedKnowledge){
    const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
    if(!exact(input,['scope','intent'])||!exact(input.intent,versionedKeys.read))return reject(400);
