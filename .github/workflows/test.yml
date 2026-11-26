@@ -50,3 +50,34 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: node --test experimental/agent-mcp/test/*.test.js
+
+  browser:
+    name: Synthetic browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Set up pnpm
+        uses: pnpm/action-setup@9bbca1e9dc2902adb87e8780fe5c98796985a62d # v6.1.1
+        with:
+          version: 12.15.0
+          run_install: false
+      - name: Install browser test tooling
+        run: |
+          mkdir -p "$RUNNER_TEMP/weftline-browser"
+          pnpm --dir "$RUNNER_TEMP/weftline-browser" add --ignore-scripts --lockfile=false playwright-core@1.65.1
+      - name: Test with sandboxed Chrome and synthetic provider
+        env:
+          TMPDIR: ${{ runner.temp }}
+          PLAYWRIGHT_CORE: ${{ runner.temp }}/weftline-browser/node_modules/playwright-core/index.mjs
+        run: |
+          export CHROMIUM_PATH="$(command -v google-chrome)"
+          test -n "$CHROMIUM_PATH"
+          node --test test/review-candidate-display-browser.test.js
