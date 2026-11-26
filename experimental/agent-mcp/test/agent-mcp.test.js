@@ -98,19 +98,117 @@ test('MCP protocol validation does not reflect untrusted extension keys',{timeou
  const output=await new Promise((resolve,reject)=>{let buffer='';const timer=setTimeout(()=>reject(Error('no response')),5000);child.stdout.on('data',x=>{buffer+=x.toString();if(buffer.includes('\n')){clearTimeout(timer);resolve(buffer.slice(0,buffer.indexOf('\n')));}});child.once('exit',()=>{clearTimeout(timer);reject(Error('server exited'));});});
  const response=JSON.parse(output);assert.equal(response.id,1);assert.equal(typeof response.error.code,'number');assert.equal(response.error.message,'Request unavailable.');assert.equal(Object.hasOwn(response.error,'data'),false);assert.doesNotMatch(output+stderr,/synthetic-secret-marker/);
 });
+test('output queue threshold checks the actual transport before each send',{timeout:10000},()=>{
+ // Evaluate the exact class definition from server.js without starting its CLI.
+ // The SDK transport and its send implementation remain real; only the observed
+ // stdout queue length is controlled so both sides of the boundary are repeatable.
+ const script=`import {readFileSync} from 'node:fs';
+import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
+const source=readFileSync(${JSON.stringify(server)},'utf8');
+const definition=source.slice(source.indexOf('class RedactedTransport '),source.indexOf('\\n\\ntry {'));
+if(!definition.startsWith('class RedactedTransport ')||!definition.endsWith('}'))throw Error('transport definition not found');
+const Transport=new Function('StdioServerTransport',definition+';return RedactedTransport')(StdioServerTransport);
+let queued=65536;Object.defineProperty(process.stdout,'writableLength',{get:()=>queued});
+const transport=new Transport(process.stdin,process.stdout,{maxBufferSize:65536});
+await transport.send({jsonrpc:'2.0',id:1,result:{}});
+process.stderr.write('at-limit-sent\\n');queued=65537;
+await transport.send({jsonrpc:'2.0',id:2,result:{}});
+process.stderr.write('above-limit-sent\\n');`;
+ const r=spawnSync(process.execPath,['--input-type=module','-e',script],{cwd:resolve(root,'experimental/agent-mcp'),env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},encoding:'utf8',timeout:5000});
+ assert.equal(r.error,undefined);assert.match(r.stderr,/at-limit-sent/);
+ assert.equal(r.status,73,'the next send above the output queue limit must exit 73');assert.doesNotMatch(r.stderr,/above-limit-sent/);
+ assert.equal(JSON.parse(r.stdout).id,1);
+});
+async function floodUntilExit(child,batch,deadline,signal){
+ const exited=()=>child.exitCode!==null||child.signalCode!==null;
+ const stopped=()=>signal?.aborted||performance.now()>=deadline;
+ const wait=(delay,drain=false)=>new Promise(resolve=>{
+  const target=drain?deadline:Math.min(performance.now()+delay,deadline);let timer;
+  const finish=()=>{clearTimeout(timer);child.off('exit',finish);if(drain)child.stdin.off('drain',finish);signal?.removeEventListener('abort',finish);resolve();};
+  const tick=()=>{const remaining=target-performance.now();if(remaining>0)timer=setTimeout(tick,Math.ceil(remaining));else finish();};
+  timer=setTimeout(tick,Math.max(0,Math.ceil(target-performance.now())));
+  child.once('exit',finish);if(drain)child.stdin.once('drain',finish);signal?.addEventListener('abort',finish,{once:true});
+  if(exited()||stopped())finish();
+ });
+ for(let i=0;i<200;i++){
+  if(stopped())return 'timeout';
+  if(exited())return 'exit';
+  if(!child.stdin.write(batch))await wait(deadline-performance.now(),true);
+  if(stopped())return 'timeout';
+  if(exited())return 'exit';
+  await wait(2);
+ }
+ if(!exited()&&!stopped())await wait(deadline-performance.now());
+ return stopped()?'timeout':exited()?'exit':'timeout';
+}
+test('flood deadline stops stalled writes and removes exit/drain listeners',{timeout:2000},async()=>{
+ const {EventEmitter}=await import('node:events');
+ const child=new EventEmitter();child.stdin=new EventEmitter();child.exitCode=null;child.signalCode=null;
+ let writes=0;child.stdin.write=()=>{writes++;return false;};
+ const start=performance.now();
+ assert.equal(await floodUntilExit(child,'batch',start+80),'timeout');
+ assert.ok(performance.now()-start<600,'stalled drain must respect the shared budget');
+ assert.equal(writes,1);assert.equal(child.listenerCount('exit'),0);assert.equal(child.stdin.listenerCount('drain'),0);
+ const exiting=new EventEmitter();exiting.stdin=new EventEmitter();exiting.exitCode=null;exiting.signalCode=null;
+ let exitWrites=0;exiting.stdin.write=()=>{exitWrites++;setImmediate(()=>{exiting.exitCode=73;exiting.emit('exit',73,null);});return false;};
+ assert.equal(await floodUntilExit(exiting,'batch',performance.now()+500),'exit');
+ assert.equal(exitWrites,1);assert.equal(exiting.listenerCount('exit'),0);assert.equal(exiting.stdin.listenerCount('drain'),0);
+ const aborting=new EventEmitter();aborting.stdin=new EventEmitter();aborting.exitCode=null;aborting.signalCode=null;let abortWrites=0;
+ const controller=new AbortController();aborting.stdin.write=()=>{abortWrites++;setImmediate(()=>controller.abort());return false;};
+ assert.equal(await floodUntilExit(aborting,'batch',performance.now()+500,controller.signal),'timeout');
+ assert.equal(abortWrites,1);assert.equal(aborting.listenerCount('exit'),0);assert.equal(aborting.stdin.listenerCount('drain'),0);
+});
+async function stopStdioChild(child,closed){
+ // Drain output so an already-exited child's close event can be delivered.
+ child.stdout.resume();child.stderr.resume();child.stdin.destroy();
+ const wait=ms=>new Promise(resolve=>{const timer=setTimeout(()=>resolve(null),ms);closed.then(result=>{clearTimeout(timer);resolve(result);});});
+ let result=await wait(200);if(result)return result;
+ if(child.exitCode===null&&child.signalCode===null)child.kill('SIGTERM');
+ result=await wait(200);if(result)return result;
+ if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');
+ result=await wait(1500);
+ if(!result)throw Error('stdio child closure not observed after SIGKILL');
+ return result;
+}
+test('stdio teardown escalates and awaits the exact stubborn child close',{timeout:5000},async t=>{
+ const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});process.stdin.resume();process.stdout.write('ready\\n');setInterval(()=>{},1000)"],{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},stdio:['pipe','pipe','pipe']});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+ child.stdin.on('error',()=>{});child.stderr.resume();
+ t.after(()=>stopStdioChild(child,closed));
+ await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('child ready timeout')),2000);child.stdout.once('data',()=>{clearTimeout(timer);resolve();});});
+ const result=await stopStdioChild(child,closed);
+ assert.deepEqual(result,{code:null,signal:'SIGKILL'});
+});
 test('MCP closes a client that floods requests without reading responses',{timeout:15000},async t=>{
  const f=await fixture(t),args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];
  const child=spawn(process.execPath,args,{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice'},stdio:['pipe','pipe','pipe']});
- child.stdin.on('error',()=>{});child.stderr.resume();t.after(()=>{child.stdin.destroy();child.kill();});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+ t.after(()=>stopStdioChild(child,closed));child.stdin.on('error',()=>{});child.stderr.resume();
  const initial=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'test',version:'1'}}})+'\n';
- const ready=new Promise((resolve,reject)=>{let s='';child.stdout.on('data',function read(b){s+=b;if(s.includes('\n')){child.stdout.off('data',read);child.stdout.pause();resolve();}});child.once('exit',()=>reject(Error('server closed before initialize')));});
+ const ready=new Promise((resolve,reject)=>{let s='';const finish=err=>{clearTimeout(timer);child.stdout.off('data',read);child.off('exit',closed);t.signal.removeEventListener('abort',aborted);if(err)reject(err);else{child.stdout.pause();resolve();}};const read=b=>{s+=b;if(s.includes('\n'))finish();};const closed=()=>finish(Error('server closed before initialize'));const aborted=()=>finish(Error('initialize cancelled'));const timer=setTimeout(()=>finish(Error('initialize timeout')),5000);child.stdout.on('data',read);child.once('exit',closed);t.signal.addEventListener('abort',aborted,{once:true});if(t.signal.aborted)aborted();});
  child.stdin.write(initial);await ready;
- const ended=new Promise(resolve=>child.once('exit',()=>resolve(true)));
- const batch=Array.from({length:100},(_,i)=>JSON.stringify({jsonrpc:'2.0',id:i+2,method:'ping'})+'\n').join('');
- for(let i=0;i<200&&child.exitCode===null;i++){child.stdin.write(batch);await new Promise(r=>setTimeout(r,2));}
- const closed=await Promise.race([ended,new Promise(r=>setTimeout(()=>r(false),2000))]);
- assert.equal(closed,true,'non-reading client must be disconnected');
- assert.equal(child.exitCode,73,'disconnect must be caused by the output queue limit');
+ // This bounded, paced stdio smoke may still hit the SDK's competing pre-split
+ // input limit under scheduling delays; it does not prove output liveness.
+ const batch=Array.from({length:10},(_,i)=>JSON.stringify({jsonrpc:'2.0',id:String(i).padStart(1024,'x'),method:'ping'})+'\n').join('');
+ const result=await floodUntilExit(child,batch,performance.now()+7000,t.signal);
+ assert.equal(result,'exit','non-reading client must exit before the flood deadline');
+ assert.equal(child.exitCode,73,'non-reading client must exit 73 because of the output queue limit');
+});
+test('MCP serves pipelined requests after a temporary reader stall',{timeout:20000},async t=>{
+ const f=await fixture(t),args=[server,'--enable','--endpoint',`https://127.0.0.1:${f.port}`,'--ca',f.cert,'--actor','alice','--board','b','--guard','0'];
+ const child=spawn(process.execPath,args,{env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:'alice'},stdio:['pipe','pipe','pipe']});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+ t.after(()=>stopStdioChild(child,closed));child.stdin.on('error',()=>{});child.stderr.resume();
+ let buffer='',messages=[];child.stdout.on('data',chunk=>{buffer+=chunk;let n;while((n=buffer.indexOf('\n'))>=0){messages.push(JSON.parse(buffer.slice(0,n)));buffer=buffer.slice(n+1);}});
+ child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'test',version:'1'}}})+'\n');
+ const until=async predicate=>{const end=Date.now()+5000;while(!predicate()&&Date.now()<end&&child.exitCode===null)await new Promise(r=>setTimeout(r,10));assert.ok(predicate(),'expected responses must arrive');};
+ await until(()=>messages.length===1);assert.equal(messages[0].id,1);
+ child.stdout.pause();
+ const ids=Array.from({length:30},(_,i)=>String(i).padStart(1024,'p'));
+ for(let i=0;i<ids.length;i+=10){child.stdin.write(ids.slice(i,i+10).map(id=>JSON.stringify({jsonrpc:'2.0',id,method:'ping'})+'\n').join(''));await new Promise(r=>setTimeout(r,2));}
+ await new Promise(r=>setTimeout(r,100));child.stdout.resume();
+ await until(()=>messages.length===31);assert.deepEqual(messages.slice(1).map(m=>m.id).sort(),ids.sort());
+ assert.ok(messages.slice(1).every(m=>m.result&&!m.error));assert.equal(child.exitCode,null);
 });
 test('MCP remains usable across sequential requests from a reading client',{timeout:20000},async t=>{
  const f=await fixture(t),c=await client(t,f);
