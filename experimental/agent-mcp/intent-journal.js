@@ -10,7 +10,7 @@ import {parseGuardedJson} from '../guarded-strict-json.js';
 
 const fields=['board','expectedActor','guardGeneration','operation','task','taskGeneration','action'];
 const id=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(x);
-function snapshot(value, keys) {
+export function snapshot(value, keys) {
  if(!value||typeof value!=='object'||types.isProxy(value)||![Object.prototype,null].includes(Object.getPrototypeOf(value)))throw Error('invalid');
  const d=Object.getOwnPropertyDescriptors(value),all=Reflect.ownKeys(d);
  if(all.length!==keys.length||keys.some(k=>!Object.hasOwn(d,k)||!Object.hasOwn(d[k],'value')||!d[k].enumerable))throw Error('invalid');

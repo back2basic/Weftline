@@ -22,5 +22,5 @@ export function createVersionedKnowledgeComposition(options={}) {
  const config={enabled:true,endpoint:c.endpoint,approvedEndpoint:c.approvedEndpoint,project:c.project,database:c.database,table:c.table,legacyTable:c.legacyTable,legacyDatabase:c.legacyDatabase,boardId:c.boardId,teamId:c.teamId,key:c.key,maxPayloadBytes:c.maxPayloadBytes,transport:c.transport,...(c.deadlineMs===undefined?{}:{deadlineMs:c.deadlineMs})};
  const gate=createSharedKnowledgeTransport(c.transport);
  const write=createAppwriteVersionedKnowledge(config,gate), read=createAppwriteVersionedRead(config,gate), discovery=createAppwriteVersionedDiscovery(config,gate), resolution=createAppwriteVersionedResolution(config,gate);
- return Object.freeze({create:write.create,edit:write.edit,reconcile:write.reconcile,read:read.read,list:discovery.list,resolve:resolution.resolve});
+ return Object.freeze({create:write.create,edit:write.edit,reconcile:write.reconcile,read:read.read,readScoped:read.readScoped,list:discovery.list,resolve:resolution.resolve});
 }

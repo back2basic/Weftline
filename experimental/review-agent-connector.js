@@ -35,6 +35,10 @@ export function validateConfig(args) {
  const cert=new X509Certificate(ca);if(!cert.ca||Date.now()<Date.parse(cert.validFrom)||Date.now()>Date.parse(cert.validTo))throw Error('configuration');
  const handle=Object.freeze({});configs.set(handle,{port,ca,hostname:url.hostname,host:remote?url.host:`127.0.0.1:${port}`,endpoint:o['--endpoint'],actor:o['--actor'],board:o['--board'],guardGeneration:Number(o['--guard'])});return handle;
 }
+export function validatedConnection(handle){
+ const c=configs.get(handle);if(!c)throw Error('Invalid configuration');
+ return Object.freeze({...c,ca:Buffer.from(c.ca)});
+}
 function inputSnapshot(value){
  const x=snapshot(value,['session','operation'],['task','continuation','guardGeneration']);
  if(typeof x.session!=='string'||!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(x.session)||!['discover','resolve'].includes(x.operation)|| (x.operation==='resolve'?!id(x.task):Object.hasOwn(x,'task')) || (Object.hasOwn(x,'continuation')&&!token(x.continuation,x.operation)) || (Object.hasOwn(x,'guardGeneration')&&(!Number.isSafeInteger(x.guardGeneration)||x.guardGeneration<0||x.guardGeneration>999998)))throw Error('input');

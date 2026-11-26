@@ -29,7 +29,9 @@ try {
  const proxy=e.WEFTLINE_REVIEW_PROXY==='1';
  const readOnly=e.WEFTLINE_REVIEW_READ_ONLY==='1';
  const scopedAgent=e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES==='1';
+ const scopedKnowledge=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ==='1';
  if(e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES!==undefined&&(!scopedAgent||readOnly))throw Error('Invalid configuration');
+ if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ!==undefined&&(!scopedKnowledge||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_READ_ONLY!==undefined&&!readOnly)throw Error('Invalid configuration');
  if(readOnly&&(proxy||['WEFTLINE_REVIEW_AUTH','WEFTLINE_REVIEW_UI','WEFTLINE_REVIEW_KNOWLEDGE_V2','WEFTLINE_REVIEW_KNOWLEDGE_LIST_V2','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_UI','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_WRITE_UI'].some(k=>e[k]!==undefined)))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_PROXY!==undefined&&!proxy)throw Error('Invalid configuration');
@@ -90,7 +92,8 @@ try {
   if(knowledge&&['/knowledge/v2/create','/knowledge/v2/read','/knowledge/v2/preflight','/knowledge/v2/create-with-receipt','/knowledge/v2/receipt'].includes(req.url)){if(count('content-encoding'))return reject(400);if(active>=4||knowledgeGate.active>=4)return reject(503);active++;Promise.resolve().then(()=>knowledge(req,res)).finally(()=>active--).catch(()=>reject(503));return;}
   const isAuth=e.WEFTLINE_REVIEW_AUTH==='1'&&['/login','/account','/logout'].includes(req.url);
   const isList=!!knowledgeList&&req.url==='/knowledge/v2/list';
-  const isVersioned=!!versioned&&versionedRoutes.has(req.url);
+  const isScopedKnowledge=!!versioned&&scopedKnowledge&&req.url==='/knowledge/versioned/scoped-read';
+  const isVersioned=!!versioned&&(versionedRoutes.has(req.url)||isScopedKnowledge);
   const isScoped=scopedAgent&&['/review/scoped-transition','/review/scoped-receipt'].includes(req.url);
   if(!isAuth&&!isList&&!isVersioned&&!isScoped&&!['/review/genesis','/review/transition','/review/receipt','/review/task','/review/discovery','/review/resolve'].includes(req.url))return reject(404);
   if(req.method!==(isAuth&&req.url==='/account'?'GET':'POST'))return reject(405);
@@ -106,7 +109,13 @@ try {
   const controller=new AbortController(),timer=setTimeout(()=>{controller.abort();reply(202,{status:'unknown',...(checkpoint?{consistency:'advisory-non-snapshot',continuation:checkpoint}:{})});if(!req.complete)req.destroy();},10000);
   const disconnect=()=>{if(!res.writableFinished)controller.abort();};res.once('close',disconnect);
   (async()=>{try{const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>4096)return reject(400);chunks.push(c);}controller.signal.throwIfAborted();let input;try{input=parseGuardedJson(Buffer.concat(chunks));}catch{return reject(400);}let scopeCheck;if(isScoped){const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));if(!exact(input,['scope','intent']))return reject(400);const scope=input.scope;scopeCheck=()=>!!exact(scope,['endpoint','project','database','table'])&&Object.keys(backendScope).every(k=>scope[k]===backendScope[k]);input=input.intent;}if(isVersioned){
-   if(!input||typeof input!=='object'||Array.isArray(input)||Object.hasOwn(input,'session')||Object.hasOwn(input,'signal'))return reject(400);
+   if(isScopedKnowledge){
+   const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
+   if(!exact(input,['scope','intent'])||!exact(input.intent,versionedKeys.read))return reject(400);
+   const result=await versioned.readScoped({...input.intent,scope:input.scope,session,signal:controller.signal});
+   return reply(result.status==='advisory'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);
+  }
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.hasOwn(input,'session')||Object.hasOwn(input,'signal'))return reject(400);
    const method=req.url.slice('/knowledge/versioned/'.length),keys=versionedKeys[method];
    if(!keys.every(k=>Object.hasOwn(input,k))||Object.keys(input).some(k=>!keys.includes(k)&&!((method==='list'||method==='resolve')&&k==='continuation')))return reject(400);
    const result=await versioned[method]({...input,session,signal:controller.signal});
