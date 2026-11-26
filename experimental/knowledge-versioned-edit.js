@@ -1,4 +1,4 @@
-// Unwired synthetic experiment. Requires a separate private table in the SAME
+// Opt-in synthetic experiment. Requires a separate private table in the SAME
 // database, verified payload capacity, exclusive trusted writers and atomic
 // create-only transaction collisions. Not compatible with legacy discovery.
 // Membership is not transaction-fenced; revocation can race an authorized write.
@@ -14,7 +14,9 @@ import {id,snap,size,validGeneration,rowId,receiptId,version,matchReceipt} from 
 const op=x=>typeof x==='string'&&/^[a-f0-9]{32}$/.test(x);
 const session=x=>typeof x==='string'&&/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(x);
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
-export function createVersionedKnowledge(options={}){
+export function createVersionedKnowledge(options={}){return buildVersionedKnowledge(options);}
+const scopeKeys=['endpoint','project','database','table','boardId','teamId'];
+function buildVersionedKnowledge(options={},boundScope){
  const c=snap(options,['enabled','boardId','teamId','membership','store','maxPayloadBytes','deadlineMs'],false);
  if(c.enabled!==true)return Object.freeze({create:async()=>({status:'disabled'}),edit:async()=>({status:'disabled'}),reconcile:async()=>({status:'disabled'})});
  if(!id(c.boardId)||!id(c.teamId)||typeof c.membership!=='function'||!Number.isSafeInteger(c.maxPayloadBytes)||c.maxPayloadBytes<1||c.maxPayloadBytes>1024)throw Error('invalid configuration');
@@ -29,12 +31,28 @@ export function createVersionedKnowledge(options={}){
   const interrupted=new Promise(resolve=>{onAbort=()=>{controller.abort();resolve({status:'unknown'});};bridge.signal?.addEventListener('abort',onAbort,{once:true});timer=setTimeout(onAbort,deadline);});
   const work=(async()=>{try{
    const keys=['session','expectedActor','documentId','operationId','title','html',...(mode==='create'?[]:['previousGeneration']),...(Object.hasOwn(input,'signal')?['signal']:[])];
-   const r=snap(input,keys);const prev=mode==='create'?-1:r.previousGeneration, gen=prev+1;
+   let scopeMatches=false,request=input;
+   if(boundScope){
+    const scopeDescriptor=Object.getOwnPropertyDescriptor(input,'scope');
+    try {
+     if(scopeDescriptor&&Object.hasOwn(scopeDescriptor,'value')){
+      const supplied=snap(scopeDescriptor.value,scopeKeys);
+      scopeMatches=scopeKeys.every(k=>supplied[k]===boundScope[k]);
+     }
+    }catch{/* Defer invalid scope until membership has been checked. */}
+    request=Object.create(Object.getPrototypeOf(input));
+    for(const key of Reflect.ownKeys(input))if(key!=='scope')Object.defineProperty(request,key,Object.getOwnPropertyDescriptor(input,key));
+   }
+   const r=snap(request,keys);const prev=mode==='create'?-1:r.previousGeneration, gen=prev+1;
    if(!session(r.session)||!id(r.expectedActor)||!id(r.documentId)||!op(r.operationId)||!(prev===-1&&(mode==='create'||mode==='reconcile')||validGeneration(prev)&&validGeneration(gen))||typeof r.title!=='string'||!r.title.trim()||Buffer.byteLength(r.title)>200||typeof r.html!=='string'||Buffer.byteLength(r.html)>1024)return {status:'invalid'};
    check();const rawMember=await c.membership({session:r.session,expectedActor:r.expectedActor,boardId:c.boardId,signal:controller.signal,deadline:end});check();
    if(rawMember===null)return {status:'denied'};
    const member=snap(rawMember,['active','boardId','teamId','userId']);
    if(member.active!==true||member.boardId!==c.boardId||member.teamId!==c.teamId||member.userId!==r.expectedActor)return {status:'denied'};
+   if(boundScope){
+    if(!scopeMatches)return {status:'unknown'};
+    check();
+   }
    const fingerprint=hash(['knowledge-version-intent-v1',c.boardId,r.documentId,prev,gen,r.expectedActor,r.operationId,r.title,r.html]);
    const receipt={kind:'knowledge-version-receipt-v1',boardId:c.boardId,documentId:r.documentId,actor:r.expectedActor,operationId:r.operationId,previousGeneration:prev,generation:gen,fingerprint};
    if(size(receipt)>c.maxPayloadBytes)return {status:'invalid'};
@@ -57,11 +75,19 @@ export function createVersionedKnowledge(options={}){
 // Configuration is operator supplied. Equality checks do not prove ACLs or
 // exclude another privileged writer; those remain deployment gates.
 export function createAppwriteVersionedKnowledge(options={},sharedGate){
+ return buildAppwriteVersionedKnowledge(options,sharedGate,false);
+}
+// The composition mounts this receiver only when scoped writes are enabled.
+export function createAppwriteScopedVersionedKnowledge(options={},sharedGate){
+ return buildAppwriteVersionedKnowledge(options,sharedGate,true);
+}
+function buildAppwriteVersionedKnowledge(options,sharedGate,scoped){
  const c=snap(options,['enabled','endpoint','approvedEndpoint','project','database','table','legacyTable','legacyDatabase','boardId','teamId','key','maxPayloadBytes','transport','deadlineMs'],false);
  if(c.enabled!==true)return createVersionedKnowledge();
  if(!id(c.database)||!id(c.table)||!id(c.legacyTable)||(c.legacyDatabase!==undefined&&!id(c.legacyDatabase))||(c.table===c.legacyTable&&(c.legacyDatabase===undefined||c.database===c.legacyDatabase))||typeof c.key!=='string'||!/[\x21-\x7e]/.test(c.key)||! /^[\x21-\x7e]{1,4096}$/.test(c.key)||typeof c.transport!=='function')throw Error('invalid configuration');
  const transport=knowledgeTransportFor(c.transport,sharedGate);
  const membership=createTeamMembershipProvider({endpoint:c.endpoint,approvedEndpoint:c.approvedEndpoint,project:c.project,boardId:c.boardId,teamId:c.teamId,transport});
  const store=appwriteStore({endpoint:c.endpoint,project:c.project,database:c.database,table:c.table,key:c.key,fetchImpl:transport});
- return createVersionedKnowledge({enabled:true,boardId:c.boardId,teamId:c.teamId,membership,store:{get:store.get,transaction:store.transaction},maxPayloadBytes:c.maxPayloadBytes,...(c.deadlineMs===undefined?{}:{deadlineMs:c.deadlineMs})});
+ const boundScope=scoped?{endpoint:c.endpoint,project:c.project,database:c.database,table:c.table,boardId:c.boardId,teamId:c.teamId}:undefined;
+ return buildVersionedKnowledge({enabled:true,boardId:c.boardId,teamId:c.teamId,membership,store:{get:store.get,transaction:store.transaction},maxPayloadBytes:c.maxPayloadBytes,...(c.deadlineMs===undefined?{}:{deadlineMs:c.deadlineMs})},boundScope);
 }

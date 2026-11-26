@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {readFileSync,writeFileSync,appendFileSync} from 'node:fs';
 const hash=(...x)=>createHash('sha256').update(JSON.stringify(x)).digest('hex').slice(0,32);
 const rows=new Map();
-for(const [user,role] of [['alice','worker'],['bob','reviewer']]) {
+for(const [user,role] of [['alice','worker'],['bob','reviewer'],['charlie','worker']]) {
  rows.set(hash('guard','b',user,0),{kind:'review-guard-v1',board:'b',user,generation:0,state:'active',role});
 }
 let transactions=new Map(),next=0;
@@ -11,7 +11,7 @@ const json=(x,status=200)=>new Response(JSON.stringify(x),{status});
 globalThis.fetch=async (url,opt)=>{
  const u=new URL(url), root='/v1/tablesdb/db/tables/review/rows';
  if(u.origin!=='https://provider.example.test')throw Error('unexpected authority');
- if(u.pathname==='/v1/account'&&opt.method==='GET') {const actor=opt.headers.Cookie?.split('=').at(-1);return ['alice','bob','outsider'].includes(actor)?json({$id:actor,status:true}):json({},401);}
+ if(u.pathname==='/v1/account'&&opt.method==='GET') {const actor=opt.headers.Cookie?.split('=').at(-1);return ['alice','bob','charlie','outsider'].includes(actor)?json({$id:actor,status:true}):json({},401);}
  if(opt.headers['X-Appwrite-Key']!=='synthetic')throw Error('unexpected key');
  if(opt.method==='GET'&&process.env.REVIEW_TEST_READS_FILE)appendFileSync(process.env.REVIEW_TEST_READS_FILE,'read\n');
  if(u.pathname.startsWith(root+'/')&&opt.method==='GET'){if(process.env.REVIEW_TEST_GUARD_FILE){let changes;try{changes=JSON.parse(readFileSync(process.env.REVIEW_TEST_GUARD_FILE,'utf8'));}catch{}if(changes)for(const row of changes)rows.set(hash('guard',row.board,row.user,row.generation),row);}const id=u.pathname.slice(root.length+1);if(process.env.REVIEW_TEST_ROWS_FILE){let override;try{override=JSON.parse(readFileSync(process.env.REVIEW_TEST_ROWS_FILE,'utf8'));}catch{}if(override?.id===id){if(override.hang)await new Promise((resolve,reject)=>{if(opt.signal?.aborted)return reject(Error('aborted'));opt.signal?.addEventListener('abort',()=>reject(Error('aborted')),{once:true});});return json({$id:id,payload:JSON.stringify(override.data)});}}return rows.has(id)?json({$id:id,payload:JSON.stringify(rows.get(id))}):json({type:'row_not_found'},404);}

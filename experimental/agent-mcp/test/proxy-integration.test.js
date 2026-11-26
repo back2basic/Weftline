@@ -47,5 +47,6 @@ test('remote MCP crosses synthetic HTTPS ingress into the actual proxy receiver'
  const resolution=await alice.callTool({name:'resolve',arguments:{task:'task'}});assert.notEqual(resolution.isError,true);assert.equal(JSON.parse(resolution.content[0].text).state,'unknown');
  const wrongActor=await connect('alice','bob');assert.equal((await wrongActor.callTool({name:'discover',arguments:{}})).isError,true);
  const wrongGuard=await connect('alice','alice','1');assert.equal((await wrongGuard.callTool({name:'discover',arguments:{}})).isError,true);
+ const disabled=await new Promise((ok,bad)=>{const req=http.request({host:'127.0.0.1',port:receiverPort,path:'/review/scoped-transition',method:'POST',headers:{host:new URL(origin).host,origin,'x-weftline-proxy-secret':secret,'sec-fetch-site':'same-origin','sec-fetch-mode':'cors','sec-fetch-dest':'empty','content-type':'application/json',cookie:'__Host-weftline=alice'}},res=>{res.resume();res.on('end',()=>ok(res.statusCode));});req.on('error',bad);req.end('{}');});assert.equal(disabled,404);
  assert.equal(existsSync(writes),false);
 });

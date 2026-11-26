@@ -10,7 +10,7 @@ import {parseGuardedJson} from '../guarded-strict-json.js';
 
 const fields=['board','expectedActor','guardGeneration','operation','task','taskGeneration','action'];
 const id=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(x);
-function snapshot(value, keys) {
+export function snapshot(value, keys) {
  if(!value||typeof value!=='object'||types.isProxy(value)||![Object.prototype,null].includes(Object.getPrototypeOf(value)))throw Error('invalid');
  const d=Object.getOwnPropertyDescriptors(value),all=Reflect.ownKeys(d);
  if(all.length!==keys.length||keys.some(k=>!Object.hasOwn(d,k)||!Object.hasOwn(d[k],'value')||!d[k].enumerable))throw Error('invalid');
@@ -18,7 +18,7 @@ function snapshot(value, keys) {
 }
 function intentSnapshot(value) {
  const x=snapshot(value,fields);
- if(![x.board,x.expectedActor,x.operation,x.task].every(id)||!['claim','submit'].includes(x.action)||!Number.isSafeInteger(x.guardGeneration)||x.guardGeneration<0||x.guardGeneration>=999998||!Number.isSafeInteger(x.taskGeneration)||x.taskGeneration<0||x.taskGeneration>=999999)throw Error('invalid');
+ if(![x.board,x.expectedActor,x.operation,x.task].every(id)||!['claim','submit','approve','reject'].includes(x.action)||!Number.isSafeInteger(x.guardGeneration)||x.guardGeneration<0||x.guardGeneration>=999998||!Number.isSafeInteger(x.taskGeneration)||x.taskGeneration<0||x.taskGeneration>=999999)throw Error('invalid');
  return x;
 }
 function exactReceipt(result,intent) {

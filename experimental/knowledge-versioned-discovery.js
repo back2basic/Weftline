@@ -29,9 +29,16 @@ function classify(raw,max){
  return {row,x};
 }
 export function createVersionedDiscovery(options={}){
- const c=snap(options,['enabled','boardId','teamId','membership','store','maxPayloadBytes','deadlineMs'],false);
- if(c.enabled!==true)return Object.freeze({list:async()=>({status:'disabled'})});
+ const c=snap(options,['enabled','boardId','teamId','membership','store','maxPayloadBytes','deadlineMs','backendScope'],false);
+ if(c.enabled!==true)return Object.freeze({list:async()=>({status:'disabled'}),listScoped:async()=>({status:'disabled'})});
  if(!id(c.boardId)||!id(c.teamId)||typeof c.membership!=='function'||!Number.isSafeInteger(c.maxPayloadBytes)||c.maxPayloadBytes<1||c.maxPayloadBytes>1024)throw Error('invalid configuration');
+ const scopeKeys=['endpoint','project','database','table','boardId','teamId'];let boundScope;
+ if(c.backendScope!==undefined){
+  boundScope=snap(c.backendScope,scopeKeys);
+  if(![boundScope.project,boundScope.database,boundScope.table,boundScope.boardId,boundScope.teamId].every(id)||boundScope.boardId!==c.boardId||boundScope.teamId!==c.teamId)throw Error('invalid configuration');
+  let u;try{u=new URL(boundScope.endpoint);}catch{throw Error('invalid configuration');}
+  if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||u.pathname!=='/v1'||u.href!==boundScope.endpoint)throw Error('invalid configuration');
+ }
  const store=snap(c.store,['listPage','get','transaction'],false);if(typeof store.listPage!=='function')throw Error('invalid store');
  const deadline=c.deadlineMs===undefined?10000:c.deadlineMs;if(!Number.isSafeInteger(deadline)||deadline<1||deadline>30000)throw Error('invalid deadline');
  const key=randomBytes(32),life=300000;let active=0;
@@ -43,7 +50,8 @@ export function createVersionedDiscovery(options={}){
   const x=snap(JSON.parse(p.subarray(0,i)),['cursor','actor','boardId','teamId','purpose','expires']);const now=Date.now();
   if(!id(x.cursor)||x.actor!==actor||x.boardId!==c.boardId||x.teamId!==c.teamId||x.purpose!=='knowledge-versioned-discovery'||!Number.isSafeInteger(x.expires)||x.expires<=now||x.expires>now+life)throw Error();return x.cursor;
  }
- async function list(input){
+ async function list(input,scoped=false){
+  if(scoped&&!boundScope)return {status:'disabled'};
   if(active>=4)return {status:'unknown'};active++;
   const end=performance.now()+deadline,controller=new AbortController();let bridge,timer,onAbort;
   try{if(types.isProxy(input))throw Error();const d=Object.getOwnPropertyDescriptor(input,'signal');if(d&&!Object.hasOwn(d,'value'))throw Error();bridge=bridgeSignal(d?.value);}catch{active--;return {status:'unknown'};}
@@ -51,11 +59,13 @@ export function createVersionedDiscovery(options={}){
   let interrupted;
   try{interrupted=new Promise(resolve=>{onAbort=()=>{controller.abort();resolve({status:'unknown'});};bridge.signal?.addEventListener('abort',onAbort,{once:true});timer=setTimeout(onAbort,deadline);});}catch{bridge.dispose();active--;return {status:'unknown'};}
   const work=(async()=>{try{
-   const keys=['session','expectedActor',...(Object.hasOwn(input,'continuation')?['continuation']:[]),...(Object.hasOwn(input,'signal')?['signal']:[])];const r=snap(input,keys);
+   const keys=['session','expectedActor',...(scoped?['scope']:[]),...(Object.hasOwn(input,'continuation')?['continuation']:[]),...(Object.hasOwn(input,'signal')?['signal']:[])];const r=snap(input,keys);
+   let supplied; if(scoped){try{supplied=snap(r.scope,scopeKeys);}catch{}}
    if(!session(r.session)||!id(r.expectedActor))return {status:'denied'};
    check();const raw=await c.membership({session:r.session,expectedActor:r.expectedActor,boardId:c.boardId,signal:controller.signal,deadline:end});check();
    if(raw===null)return {status:'denied'};const m=snap(raw,['active','boardId','teamId','userId']);
    if(m.active!==true||m.boardId!==c.boardId||m.teamId!==c.teamId||m.userId!==r.expectedActor)return {status:'denied'};
+   if(scoped&&(!supplied||!scopeKeys.every(k=>supplied[k]===boundScope[k])))return {status:'unknown'};
    let cursor;try{if(Object.hasOwn(r,'continuation'))cursor=open(r.continuation,r.expectedActor);}catch{check();return {status:'invalid'};}check();
    const rows=pageRows(await store.listPage({limit:25,...(cursor?{cursor}:{}),signal:controller.signal}));check();
    const documents=[];let prev=cursor;for(const rawRow of rows){const {row,x}=classify(rawRow,c.maxPayloadBytes);if(prev!==undefined&&row.id<=prev)throw Error();prev=row.id;if(x.boardId===c.boardId&&x.kind==='knowledge-version-v1'&&x.generation===0)documents.push({id:x.documentId,title:x.title,generation:0});}check();
@@ -64,7 +74,7 @@ export function createVersionedDiscovery(options={}){
   work.finally(()=>active--).catch(()=>{});
   try{const result=await Promise.race([work,interrupted]);check();return result;}catch{return {status:'unknown'};}finally{clearTimeout(timer);bridge.signal?.removeEventListener('abort',onAbort);bridge.dispose();controller.abort();}
  }
- return Object.freeze({list});
+ return Object.freeze({list:input=>list(input),listScoped:input=>list(input,true)});
 }
 export function createAppwriteVersionedDiscovery(options={},sharedGate){
  const c=snap(options,['enabled','endpoint','approvedEndpoint','project','database','table','legacyTable','legacyDatabase','boardId','teamId','key','maxPayloadBytes','transport','deadlineMs'],false);
@@ -73,5 +83,6 @@ export function createAppwriteVersionedDiscovery(options={},sharedGate){
  const transport=knowledgeTransportFor(c.transport,sharedGate);
  const membership=createTeamMembershipProvider({endpoint:c.endpoint,approvedEndpoint:c.approvedEndpoint,project:c.project,boardId:c.boardId,teamId:c.teamId,transport});
  const store=appwriteStore({endpoint:c.endpoint,project:c.project,database:c.database,table:c.table,key:c.key,fetchImpl:transport});
- return createVersionedDiscovery({enabled:true,boardId:c.boardId,teamId:c.teamId,membership,store:{listPage:store.listPage},maxPayloadBytes:c.maxPayloadBytes,...(c.deadlineMs===undefined?{}:{deadlineMs:c.deadlineMs})});
+ const backendScope={endpoint:c.endpoint,project:c.project,database:c.database,table:c.table,boardId:c.boardId,teamId:c.teamId};
+ return createVersionedDiscovery({enabled:true,boardId:c.boardId,teamId:c.teamId,backendScope,membership,store:{listPage:store.listPage},maxPayloadBytes:c.maxPayloadBytes,...(c.deadlineMs===undefined?{}:{deadlineMs:c.deadlineMs})});
 }
