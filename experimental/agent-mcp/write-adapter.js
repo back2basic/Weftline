@@ -37,7 +37,7 @@ export function createWriteAdapter({args,session,journalDir,backendScope}) {
     intent=prior.intent;if(intent.expectedActor!==actor||intent.board!==board)return {status:'blocked'};
     route='receipt';
    }else{
-    if(!['claim','submit'].includes(action)||!exact(args,['operation','task','guardGeneration','taskGeneration'])||![args.operation,args.task].every(id)||!gen(args.guardGeneration,999997)||!gen(args.taskGeneration,999998))return {status:'invalid'};
+    if(!['claim','submit','approve','reject'].includes(action)||!exact(args,['operation','task','guardGeneration','taskGeneration'])||![args.operation,args.task].every(id)||!gen(args.guardGeneration,999997)||!gen(args.taskGeneration,999998))return {status:'invalid'};
     intent={board,expectedActor:actor,guardGeneration:args.guardGeneration,operation:args.operation,task:args.task,taskGeneration:args.taskGeneration,action};
     if(signal?.aborted)return {status:'blocked'};
     if(journal.begin(intent).status!=='pending')return {status:'blocked'};

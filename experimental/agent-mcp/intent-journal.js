@@ -18,7 +18,7 @@ function snapshot(value, keys) {
 }
 function intentSnapshot(value) {
  const x=snapshot(value,fields);
- if(![x.board,x.expectedActor,x.operation,x.task].every(id)||!['claim','submit'].includes(x.action)||!Number.isSafeInteger(x.guardGeneration)||x.guardGeneration<0||x.guardGeneration>=999998||!Number.isSafeInteger(x.taskGeneration)||x.taskGeneration<0||x.taskGeneration>=999999)throw Error('invalid');
+ if(![x.board,x.expectedActor,x.operation,x.task].every(id)||!['claim','submit','approve','reject'].includes(x.action)||!Number.isSafeInteger(x.guardGeneration)||x.guardGeneration<0||x.guardGeneration>=999998||!Number.isSafeInteger(x.taskGeneration)||x.taskGeneration<0||x.taskGeneration>=999999)throw Error('invalid');
  return x;
 }
 function exactReceipt(result,intent) {
