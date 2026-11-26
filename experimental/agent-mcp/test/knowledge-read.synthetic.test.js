@@ -33,14 +33,16 @@ test('opt-in exact knowledge reads cross stdio and scoped TLS receiver', {timeou
  const baseArgs=[resolve(root,'experimental/agent-mcp/server.js'),'--enable','--remote-https','--endpoint',origin,'--ca',cert,'--actor','alice','--board','board','--guard','0'];
  const knowledgeArgs=['--enable-knowledge-read','--knowledge-endpoint',endpoint,'--knowledge-project',project,'--knowledge-database','db','--knowledge-table','versions','--knowledge-team','team'];
  const writeArgs=['--enable-writes','--journal',journal,'--backend-endpoint',endpoint,'--backend-project',project,'--backend-database','db','--backend-table','review'];
- async function connect({enabled=true,write=false,reverse=false,actor='alice',session='alice',scopeOverride={},board='board',url=origin,ca=cert}={}){
+ async function connect({enabled=true,write=false,list=false,reverse=false,actor='alice',session='alice',scopeOverride={},board='board',url=origin,ca=cert}={}){
   const s={...scope,...scopeOverride};const args=[resolve(root,'experimental/agent-mcp/server.js'),'--enable','--remote-https','--endpoint',url,'--ca',ca,'--actor',actor,'--board',board,'--guard','0'];
   const knowledgeGroup=['--enable-knowledge-read','--knowledge-endpoint',s.endpoint,'--knowledge-project',s.project,'--knowledge-database',s.database,'--knowledge-table',s.table,'--knowledge-team',s.teamId];
+  if(list)args.push('--enable-knowledge-list','--knowledge-list-endpoint',s.endpoint,'--knowledge-list-project',s.project,'--knowledge-list-database',s.database,'--knowledge-list-table',s.table,'--knowledge-list-team',s.teamId);
   if(reverse&&write)args.push(...writeArgs);if(enabled)args.push(...knowledgeGroup);if(!reverse&&write)args.push(...writeArgs);
   const transport=new StdioClientTransport({command:process.execPath,args,env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,NODE_OPTIONS:'--dns-result-order=ipv4first',WEFTLINE_AGENT_SESSION:session},stderr:'pipe'});let stderr='',stdout='';transport.stderr.on('data',c=>stderr+=c);const client=new Client({name:'knowledge-test',version:'1'});await client.connect(transport);transport._process.stdout.on('data',c=>stdout+=c);clients.push({client,stderr:()=>stderr,stdout:()=>stdout});return client;
  }
  const call=async(c,args={documentId:'doc',generation:0})=>c.callTool({name:'knowledge_read_version',arguments:args});
  const disabled=await connect({enabled:false});assert.deepEqual((await disabled.listTools()).tools.map(x=>x.name),['discover','resolve']);
+ const listenerDisabled=await connect({enabled:false,list:true});const beforeDisabled=(await provider.control('metrics')).requests.length;assert.deepEqual(JSON.parse((await listenerDisabled.callTool({name:'knowledge_list',arguments:{}})).content[0].text),{status:'unknown'});assert.equal((await provider.control('metrics')).requests.length,beforeDisabled);
  const writeOnly=await connect({enabled:false,write:true});assert.deepEqual((await writeOnly.listTools()).tools.map(x=>x.name),['discover','resolve','claim','submit','approve','reject','reconcile']);
  const writeBefore=requests;assert.equal(JSON.parse((await writeOnly.callTool({name:'claim',arguments:{operation:'bad!',task:'task',guardGeneration:0,taskGeneration:0}})).content[0].text).status,'invalid');assert.equal(requests,writeBefore);
  for(const reverse of [false,true]){

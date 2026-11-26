@@ -38,6 +38,7 @@ for(const order of ['knowledge-first','writes-first']) test(`combined stdio proc
   const endpoint='https://provider.example.test/v1', project='synthetic-project';
   writeFileSync(api, `apikey:synthetic\nprojectID:${project}\nendpoint:${endpoint}\n`);
   const env={PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,NODE_OPTIONS:'--import ./test/fixtures/combined-workflow-provider.js',VERSIONED_FIXTURE_PORT:String(provider.port),WEFTLINE_REVIEW_ENABLE:'1',WEFTLINE_REVIEW_AGENT_SCOPED_WRITES:'1',WEFTLINE_REVIEW_PROTOCOL:'review-v1',WEFTLINE_REVIEW_HOST:'127.0.0.1',WEFTLINE_REVIEW_PORT:'0',WEFTLINE_REVIEW_BOARD:'b',APPWRITE_ENDPOINT:endpoint,APPWRITE_PROJECT:project,WEFTLINE_APPROVED_APPWRITE_ENDPOINT:endpoint,WEFTLINE_APPROVED_APPWRITE_PROJECT:project,APPWRITE_DATABASE:'db',APPWRITE_TABLE:'review',WEFTLINE_TLS_KEY_FILE:key,WEFTLINE_TLS_CERT_FILE:cert,APPWRITE_KEY_FILE:api,REVIEW_TEST_WRITES_FILE:join(dir,'writes'),REVIEW_TEST_SNAPSHOT_FILE:join(dir,'snapshot'),WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED:'1',WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ:'1',WEFTLINE_KNOWLEDGE_VERSIONED_DATABASE_ID:'db',WEFTLINE_KNOWLEDGE_VERSIONED_TABLE_ID:'versions',WEFTLINE_KNOWLEDGE_DATABASE_ID:'db',WEFTLINE_KNOWLEDGE_TABLE_ID:'legacy',WEFTLINE_KNOWLEDGE_TEAM_ID:'team',WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES:'1024'};
+  env.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_LIST='1';
   child=spawn(process.execPath,['experimental/review-v1-cli.js'],{cwd:root,env,stdio:['ignore','pipe','pipe']});
   childClosed=new Promise(r=>child.once('close',r)); child.stderr.on('data',c=>logs+=c);
   const port=await new Promise((ok,bad)=>{let out='';const timer=setTimeout(()=>bad(Error('listener startup timeout')),5000);child.once('close',()=>{clearTimeout(timer);bad(Error('listener closed'));});child.stdout.on('data',c=>{out+=c;const m=out.match(/listener 127\.0\.0\.1:(\d+)/);if(m){clearTimeout(timer);ok(Number(m[1]));}});});
@@ -50,18 +51,20 @@ for(const order of ['knowledge-first','writes-first']) test(`combined stdio proc
   async function connect(actor,session,write=false,knowledgeTable='versions',boardTable='review'){
     const args=[resolve(root,'experimental/agent-mcp/server.js'),'--enable','--remote-https','--endpoint',origin,'--ca',cert,'--actor',actor,'--board','b','--guard','1'];
     const knowledge=['--enable-knowledge-read','--knowledge-endpoint',endpoint,'--knowledge-project',project,'--knowledge-database','db','--knowledge-table',knowledgeTable,'--knowledge-team','team'];
+    const list=['--enable-knowledge-list','--knowledge-list-endpoint',endpoint,'--knowledge-list-project',project,'--knowledge-list-database','db','--knowledge-list-table',knowledgeTable,'--knowledge-list-team','team'];
     let writes=[];if(write){const journal=join(dir,`journal-${clients.length}`);mkdirSync(journal,{mode:0o700});writes=['--enable-writes','--journal',journal,'--backend-endpoint',endpoint,'--backend-project',project,'--backend-database','db','--backend-table',boardTable];}
-    args.push(...(order==='knowledge-first'?[...knowledge,...writes]:[...writes,...knowledge]));
+    args.push(...(order==='knowledge-first'?[...list,...knowledge,...writes]:[...writes,...knowledge,...list]));
     const transport=new StdioClientTransport({command:process.execPath,args,env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,WEFTLINE_AGENT_SESSION:session},stderr:'pipe'});
     let stderr='',stdout='';transport.stderr.on('data',c=>stderr+=c);const client=new Client({name:`synthetic-${actor}`,version:'1'});await client.connect(transport);
     transport._process.stdout.on('data',c=>stdout+=c);const closed=new Promise(r=>transport._process.once('close',r));clients.push({client,closed,stderr:()=>stderr,stdout:()=>stdout});return client;
   }
   const alice=await connect('alice','alice',true), bob=await connect('bob','bob',true), mismatch=await connect('alice','bob',true);
-  assert.deepEqual((await alice.listTools()).tools.map(x=>x.name),['discover','resolve','knowledge_read_version','claim','submit','approve','reject','reconcile']);
+  assert.deepEqual((await alice.listTools()).tools.map(x=>x.name),['discover','resolve','knowledge_read_version','knowledge_list','claim','submit','approve','reject','reconcile']);
   const call=async(client,name,args)=>{const result=await client.callTool({name,arguments:args});assert.notEqual(result.isError,true);return JSON.parse(result.content[0].text);};
   const read=client=>call(client,'knowledge_read_version',{documentId:'doc',generation:0});
   assert.deepEqual(await read(alice),{status:'advisory',version});
   assert.deepEqual(await read(bob),{status:'advisory',version});
+  assert((await call(bob,'knowledge_list',{})).documents.some(x=>x.id==='doc'));
   const versionReads=async()=>(await provider.control('metrics')).requests.filter(r=>r.path.includes('/tablesdb/db/tables/versions/rows/')).length;
   const beforeDenied=await versionReads();
   assert.equal((await read(mismatch)).status,'denied');

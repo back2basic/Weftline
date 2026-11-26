@@ -33,12 +33,14 @@ export function createVersionedRead(options={}) {
   const work=(async()=>{try{
    const keys=['session','expectedActor','documentId','generation',...(scoped?['scope']:[]),...(Object.hasOwn(input,'signal')?['signal']:[])];
    const r=snap(input,keys);
+   let supplied;
+   if(scoped){try{supplied=snap(r.scope,scopeKeys);}catch{/* Defer scope rejection until after membership. */}}
    if(!session(r.session)||!id(r.expectedActor)||!id(r.documentId)||!validGeneration(r.generation))return {status:'invalid'};
    check();const raw=await c.membership({session:r.session,expectedActor:r.expectedActor,boardId:c.boardId,signal:controller.signal,deadline:end});check();
    if(raw===null)return {status:'denied'};
    const member=snap(raw,['active','boardId','teamId','userId']);
    if(member.active!==true||member.boardId!==c.boardId||member.teamId!==c.teamId||member.userId!==r.expectedActor)return {status:'denied'};
-   if(scoped){const supplied=snap(r.scope,scopeKeys);if(Object.keys(supplied).length!==scopeKeys.length||!scopeKeys.every(k=>supplied[k]===boundScope[k]))return {status:'unknown'};}
+   if(scoped&&(!supplied||Object.keys(supplied).length!==scopeKeys.length||!scopeKeys.every(k=>supplied[k]===boundScope[k])))return {status:'unknown'};
    check();const rawVersion=await store.get(rowId(c.boardId,r.documentId,r.generation),{signal:controller.signal,deadline:end});check();
    const item=version(rawVersion,c.boardId,r.documentId,r.generation,c.maxPayloadBytes);check();
    return item?{status:'advisory',version:{...item}}:{status:'unknown'};

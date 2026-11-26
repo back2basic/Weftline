@@ -30,9 +30,11 @@ try {
  const readOnly=e.WEFTLINE_REVIEW_READ_ONLY==='1';
  const scopedAgent=e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES==='1';
  const scopedKnowledge=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ==='1';
+ const scopedKnowledgeList=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_LIST==='1';
  const scopedKnowledgeWrite=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_WRITE==='1';
  if(e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES!==undefined&&(!scopedAgent||readOnly))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ!==undefined&&(!scopedKnowledge||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'))throw Error('Invalid configuration');
+ if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_LIST!==undefined&&(!scopedKnowledgeList||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_WRITE!==undefined&&(!scopedKnowledgeWrite||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_WRITE_UI!==undefined))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_READ_ONLY!==undefined&&!readOnly)throw Error('Invalid configuration');
  if(readOnly&&(proxy||['WEFTLINE_REVIEW_AUTH','WEFTLINE_REVIEW_UI','WEFTLINE_REVIEW_KNOWLEDGE_V2','WEFTLINE_REVIEW_KNOWLEDGE_LIST_V2','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_UI','WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED_WRITE_UI'].some(k=>e[k]!==undefined)))throw Error('Invalid configuration');
@@ -95,9 +97,10 @@ try {
   const isAuth=e.WEFTLINE_REVIEW_AUTH==='1'&&['/login','/account','/logout'].includes(req.url);
   const isList=!!knowledgeList&&req.url==='/knowledge/v2/list';
   const isScopedKnowledge=!!versioned&&scopedKnowledge&&req.url==='/knowledge/versioned/scoped-read';
+  const isScopedKnowledgeList=!!versioned&&scopedKnowledgeList&&req.url==='/knowledge/versioned/scoped-list';
   const scopedWriteMethod=!!versioned&&scopedKnowledgeWrite&&['create','edit','reconcile'].find(x=>req.url==='/knowledge/versioned/scoped-'+x);
   if(scopedKnowledgeWrite&&['/knowledge/versioned/create','/knowledge/versioned/edit','/knowledge/versioned/reconcile'].includes(req.url))return reject(404);
-  const isVersioned=!!versioned&&(versionedRoutes.has(req.url)||isScopedKnowledge||scopedWriteMethod);
+  const isVersioned=!!versioned&&(versionedRoutes.has(req.url)||isScopedKnowledge||isScopedKnowledgeList||scopedWriteMethod);
   const isScoped=scopedAgent&&['/review/scoped-transition','/review/scoped-receipt'].includes(req.url);
   if(!isAuth&&!isList&&!isVersioned&&!isScoped&&!['/review/genesis','/review/transition','/review/receipt','/review/task','/review/discovery','/review/resolve'].includes(req.url))return reject(404);
   if(req.method!==(isAuth&&req.url==='/account'?'GET':'POST'))return reject(405);
@@ -119,6 +122,12 @@ try {
     const method=scopedWriteMethod+'Scoped';
     const result=await versioned[method]({...input.intent,scope:input.scope,session,signal:controller.signal});
     return reply(result.status==='confirmed'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);
+   }
+   if(isScopedKnowledgeList){
+    const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
+    if(!exact(input,['scope','intent'])||!input.intent||typeof input.intent!=='object'||Array.isArray(input.intent)||!Object.hasOwn(input.intent,'expectedActor')||Object.keys(input.intent).some(k=>!['expectedActor','continuation'].includes(k)))return reject(400);
+    const result=await versioned.listScoped({...input.intent,scope:input.scope,session,signal:controller.signal});
+    return reply(result.status==='partial'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);
    }
    if(isScopedKnowledge){
    const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
