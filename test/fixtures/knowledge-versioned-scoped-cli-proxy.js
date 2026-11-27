@@ -1,6 +1,7 @@
 // Test-only: pin the CLI's configured authority to an ephemeral synthetic provider.
 const realFetch=globalThis.fetch;
-process.on('message',m=>{if(m==='fixture-barrier')process.send?.({event:'fixture-barrier'});});
+let trackNextAccount=false;
+process.on('message',m=>{if(m==='fixture-barrier')process.send?.({event:'fixture-barrier'});if(m==='fixture-arm-account'){trackNextAccount=true;process.send?.({event:'fixture-account-armed'});}});
 if(process.env.VERSIONED_FIXTURE_PORT!==undefined){
 const port=Number(process.env.VERSIONED_FIXTURE_PORT);
 if(!Number.isInteger(port)||port<1||port>65535) throw Error('invalid fixture port');
@@ -19,7 +20,10 @@ globalThis.fetch=async(url,options={})=>{
   const response=await realFetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`,{...options,headers,signal:undefined});process.send?.('late-row-delivered');return response;
  }
  if(u.pathname==='/v1/account'){
-  const response=await realFetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`,{...options,headers,signal:undefined});
+  const track=trackNextAccount;trackNextAccount=false;
+  const aborted=()=>process.send?.({event:'fixture-account-aborted'});
+  if(track){if(options.signal?.aborted)aborted();else options.signal?.addEventListener('abort',aborted,{once:true});}
+  let response;try{response=await realFetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`,{...options,headers,signal:undefined});}finally{if(track)options.signal?.removeEventListener('abort',aborted);}
   if(options.signal?.aborted)process.send?.({event:'late-account-delivered',aborted:true});
   return response;
  }
