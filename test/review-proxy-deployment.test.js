@@ -14,11 +14,11 @@ async function stopChild(child){
  const closed=new Promise(resolve=>child.once('close',resolve));child.kill('SIGKILL');
  let timer;try{await Promise.race([closed,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('listener cleanup timed out')),3000);})]);}finally{clearTimeout(timer);}
 }
-function waitFixtureEvent(child,event='late-account-delivered'){
+function waitFixtureEvent(child,event='late-account-delivered',timeout=3000){
  return new Promise((resolve,reject)=>{const cleanup=()=>{clearTimeout(timer);child.off('message',onMessage);child.off('exit',onExit);};
   const onMessage=m=>{if(m?.event===event){cleanup();resolve(m);}};
   const onExit=()=>{cleanup();reject(Error('listener exited before fixture event'));};
-  const timer=setTimeout(()=>{cleanup();reject(Error('fixture event not observed'));},3000);
+  const timer=setTimeout(()=>{cleanup();reject(Error(`fixture event not observed: ${event}`));},timeout);
   child.on('message',onMessage);child.once('exit',onExit);
  });
 }
@@ -106,8 +106,13 @@ test('opt-in proxy listener gates and serves synthetic versioned workflow', {tim
   const barrier=waitFixtureEvent(child,'fixture-barrier');child.send('fixture-barrier');await barrier;
   const beforeStarts=starts.length;
   const beforePending=(await provider.control('metrics')).requests.length;
+  // Client disconnect can be observed before the listener propagates abort.
+  // Arm the next account fetch and wait for its signal before releasing it.
+  const armed=waitFixtureEvent(child,'fixture-account-armed');child.send('fixture-arm-account');await armed;
+  const aborted=waitFixtureEvent(child,'fixture-account-aborted',15000);aborted.catch(()=>{});
   await provider.control('hold-next-account');const pending=postHeld();pending.response.catch(()=>{});await waitHeld();
   if(mode==='disconnect'){pending.req.destroy();await assert.rejects(pending.response);}else{const r=await pending.response;exactFailure(r,202,'unknown');}
+  await aborted;
   const delivered=waitFixtureEvent(child);await provider.control('release-account');assert.deepEqual(await delivered,{event:'late-account-delivered',aborted:true});
   await new Promise(r=>setTimeout(r,200));
   const flush=waitFixtureEvent(child,'fixture-barrier');child.send('fixture-barrier');await flush;
