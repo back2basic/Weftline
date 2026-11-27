@@ -9,7 +9,7 @@ const title=x=>typeof x==='string'&&x.length>0&&x.trim().length>0;
 function recognized(row,board) {
  const x=row.data;if(!x||x.board!==board||Buffer.byteLength(JSON.stringify(x))>1024)return false;
  switch(x.kind) {
- case 'review-guard-v1':return exact(x,['kind','board','user','generation','state','role'])&&id(x.user)&&gen(x.generation)&&['active','revoked'].includes(x.state)&&['worker','reviewer'].includes(x.role)&&row.id===guardId(board,x.user,x.generation);
+ case 'review-guard-v1':return exact(x,['kind','board','user','generation','state','role'])&&id(x.user)&&gen(x.generation)&&['active','revoked'].includes(x.state)&&['worker','reviewer','reader'].includes(x.role)&&row.id===guardId(board,x.user,x.generation);
  case 'review-task-v1':return exact(x,['kind','board','task','generation','state','claimant'])&&id(x.task)&&gen(x.generation)&&((x.generation===0&&x.state==='ready'&&x.claimant===null)||(x.generation>0&&['claimed','review','completed'].includes(x.state)&&id(x.claimant)))&&row.id===taskVersionId(board,x.task,x.generation);
  case 'review-receipt-v1': {
   const keys=['kind','board','expectedActor','guardGeneration','operation','task','taskGeneration','action','user'];if(Object.hasOwn(x,'title'))keys.push('title');
@@ -17,10 +17,14 @@ function recognized(row,board) {
  }
  case 'review-admin-receipt-v1': {
   const keys=['kind','board','actor','operation','action','generation','role','admin'];if(x.action==='change')keys.push('newRole');
-  return exact(x,keys)&&[x.actor,x.operation,x.admin].every(id)&&gen(x.generation)&&x.generation<=999998&&['worker','reviewer'].includes(x.role)&&['bootstrap','change','revoke'].includes(x.action)&&(x.action!=='bootstrap'||x.generation===0)&&(x.action!=='change'||(['worker','reviewer'].includes(x.newRole)&&x.newRole!==x.role&&x.generation<999998))&&row.id===hash('review-admin-receipt-v1',board,x.admin,x.operation);
+  return exact(x,keys)&&[x.actor,x.operation,x.admin].every(id)&&gen(x.generation)&&x.generation<=999998&&['worker','reviewer','reader'].includes(x.role)&&['bootstrap','change','revoke'].includes(x.action)&&(x.action!=='bootstrap'||x.generation===0)&&(x.action!=='change'||(['worker','reviewer','reader'].includes(x.newRole)&&x.newRole!==x.role&&x.generation<999998))&&row.id===hash('review-admin-receipt-v1',board,x.admin,x.operation);
  }
  default:return false;
  }
+}
+function authorizedCallerGuard(row,board,user,generation) {
+ const x=row?.data;
+ return recognized(row,board)&&x?.kind==='review-guard-v1'&&x.user===user&&x.generation===generation&&x.state==='active'&&['worker','reviewer','reader'].includes(x.role);
 }
 export function createReviewDiscovery({store,board}) {
  const key=randomBytes(32),life=300000;
@@ -36,7 +40,7 @@ export function createReviewDiscovery({store,board}) {
    if(!account||account.status!==true||account.$id!==x.expectedActor)return {code:403,status:'denied'};
    const g=await store.get(guardId(board,x.expectedActor,x.guardGeneration),{signal});check();
    const next=await store.get(guardId(board,x.expectedActor,x.guardGeneration+1),{signal});check();
-   if(!recognized({id:guardId(board,x.expectedActor,x.guardGeneration),data:g},board)||g.kind!=='review-guard-v1'||g.user!==x.expectedActor||g.generation!==x.guardGeneration||g.state!=='active'||next!==null)return {code:403,status:'denied'};
+   if(!authorizedCallerGuard({id:guardId(board,x.expectedActor,x.guardGeneration),data:g},board,x.expectedActor,x.guardGeneration)||next!==null)return {code:403,status:'denied'};
    try {if(Object.hasOwn(x,'continuation'))cursor=open(x.continuation,x.expectedActor,x.guardGeneration);}catch{return {code:400,status:'invalid'};}
    authorized=true;
    if(cursor&&onCheckpoint)onCheckpoint(x.continuation);

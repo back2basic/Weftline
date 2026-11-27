@@ -9,16 +9,16 @@ export function createTeamMembershipProvider(options) {
   if (!options || types.isProxy(options) || Object.getPrototypeOf(options) !== Object.prototype) throw Error('Invalid configuration');
   const config = Object.create(null);
   for (const key of Reflect.ownKeys(options)) {
-    if (!['endpoint','approvedEndpoint','project','boardId','teamId','transport'].includes(key)) throw Error('Invalid configuration');
+    if (!['endpoint','approvedEndpoint','project','boardId','teamId','transport','includeRoles'].includes(key)) throw Error('Invalid configuration');
     const d = Object.getOwnPropertyDescriptor(options,key);
     if (!d || !Object.hasOwn(d,'value')) throw Error('Invalid configuration');
     config[key] = d.value;
   }
-  const {endpoint,project,boardId,teamId,transport=globalThis.fetch}=config;
+  const {endpoint,project,boardId,teamId,transport=globalThis.fetch,includeRoles=false}=config;
   let url;
   try { url = new URL(endpoint); } catch { throw Error('Invalid configuration'); }
   if (endpoint !== config.approvedEndpoint || url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/v1' || url.href !== endpoint ||
-      ![project,boardId,teamId].every(id) || typeof transport !== 'function') throw Error('Invalid configuration');
+      ![project,boardId,teamId].every(id) || typeof transport !== 'function' || typeof includeRoles!=='boolean') throw Error('Invalid configuration');
   async function read(path,session,signal,checkDeadline=()=>{}) {
     checkDeadline();
     if (signal?.aborted) throw Error('Membership unavailable');
@@ -64,6 +64,9 @@ export function createTeamMembershipProvider(options) {
     if (!result || result.total !== 1 || !Array.isArray(result.memberships) || result.memberships.length !== 1) return null;
     const member=result.memberships[0];
     if (!member || typeof member !== 'object' || Array.isArray(member) || member.userId !== account.$id || member.teamId !== teamId || member.confirm !== true) return null;
-    return {active:true,boardId,teamId,userId:account.$id};
+    // Appwrite roles are arbitrary strings. Preserve their spelling, but reject
+    // ambiguous whitespace and control characters before exact policy checks.
+    if(includeRoles&&(!Array.isArray(member.roles)||member.roles.length===0||member.roles.some(role=>typeof role!=='string'||role.length<1||role.trim()!==role||/[\u0000-\u001f\u007f-\u009f]/.test(role))||new Set(member.roles).size!==member.roles.length))return null;
+    return {active:true,boardId,teamId,userId:account.$id,...(includeRoles?{roles:[...member.roles]}:{})};
   };
 }

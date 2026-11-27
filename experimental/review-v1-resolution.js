@@ -18,7 +18,7 @@ export function createReviewResolution({store,board}) {
   const check=()=>signal?.throwIfAborted();
   try{check();const account=await store.account(session,{signal});check();if(!account||account.status!==true||account.$id!==x.expectedActor)return {code:403,status:'denied'};
    const guard=await store.get(guardId(board,x.expectedActor,x.guardGeneration),{signal});check();const successor=await store.get(guardId(board,x.expectedActor,x.guardGeneration+1),{signal});check();
-   if(!exact(guard,['kind','board','user','generation','state','role'])||guard.kind!=='review-guard-v1'||guard.board!==board||guard.user!==x.expectedActor||guard.generation!==x.guardGeneration||guard.state!=='active'||!['worker','reviewer'].includes(guard.role)||successor!==null)return {code:403,status:'denied'};
+   if(!exact(guard,['kind','board','user','generation','state','role'])||guard.kind!=='review-guard-v1'||guard.board!==board||guard.user!==x.expectedActor||guard.generation!==x.guardGeneration||guard.state!=='active'||!['worker','reviewer','reader'].includes(guard.role)||successor!==null)return {code:403,status:'denied'};
    try{if(Object.hasOwn(x,'continuation'))last=open(x.continuation,x);}catch{return {code:400,status:'invalid'};}
    authorized=true;checkpoint=x.continuation||seal(x,last);onCheckpoint?.(checkpoint);
    for(let count=0;count<5;count++){const n=last===null?0:last.generation+1;if(n>999999)break;const v=await store.get(taskVersionId(board,x.task,n),{signal});check();if(v===null)break;if(!valid(v,board,x.task,n)||(last&&!follows(last,v)))throw Error();last=v;checkpoint=seal(x,last);onCheckpoint?.(checkpoint);}

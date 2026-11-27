@@ -14,6 +14,7 @@ import {createReviewResolution} from './review-v1-resolution.js';
 import {reviewBoardPage} from './review-v1-ui.js';
 import {createNodeAuthAdapter} from '../src/node-auth-adapter.js';
 import {createKnowledgeV2Adapter} from '../src/private-knowledge-listener.js';
+import {createTeamMembershipProvider} from '../src/appwrite-team-membership.js';
 import {knowledgeV2Page} from '../src/private-knowledge-v2-ui.js';
 import {boundedKnowledgeTransport} from './knowledge-transport.js';
 import {createAppwriteKnowledgeV2Discovery} from './knowledge-v2-discovery.js';
@@ -32,6 +33,8 @@ try {
  const scopedKnowledge=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ==='1';
  const scopedKnowledgeList=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_LIST==='1';
  const scopedKnowledgeWrite=e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_WRITE==='1';
+ const readerDominatesKnowledgeWrites=e.WEFTLINE_REVIEW_KNOWLEDGE_READER_DENY_WRITES==='1';
+ if(e.WEFTLINE_REVIEW_KNOWLEDGE_READER_DENY_WRITES!==undefined&&!readerDominatesKnowledgeWrites)throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_AGENT_SCOPED_WRITES!==undefined&&(!scopedAgent||readOnly))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_READ!==undefined&&(!scopedKnowledge||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'))throw Error('Invalid configuration');
  if(e.WEFTLINE_REVIEW_KNOWLEDGE_AGENT_SCOPED_LIST!==undefined&&(!scopedKnowledgeList||readOnly||e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'))throw Error('Invalid configuration');
@@ -63,11 +66,19 @@ try {
  const store=createGuardedAppwriteStore({enabled:true,endpoint,project,approvedEndpoint,approvedProject,key:values.apikey,database:backendScope.database,table:backendScope.table}),service=createReviewService({store,board:e.WEFTLINE_REVIEW_BOARD}),discovery=createReviewDiscovery({store,board:e.WEFTLINE_REVIEW_BOARD}),resolution=createReviewResolution({store,board:e.WEFTLINE_REVIEW_BOARD});
  let active=0,auth;
  const enabledKnowledge=e.WEFTLINE_REVIEW_KNOWLEDGE_V2==='1';
- // Per-listener cap covers fetch plus knowledge response body settlement.
+ if(readerDominatesKnowledgeWrites&&(!enabledKnowledge&&e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED!=='1'||!id(e.WEFTLINE_KNOWLEDGE_TEAM_ID)))throw Error('Invalid configuration');
+ // One bounded gate accounts for knowledge fetches even after a client aborts;
+ // its slots remain occupied until the underlying fetch and response settle.
  const knowledgeGate=boundedKnowledgeTransport(globalThis.fetch);
  const knowledgeTransport=knowledgeGate.transport;
+ const knowledgeRoleMembership=readerDominatesKnowledgeWrites?createTeamMembershipProvider({endpoint,approvedEndpoint:approvedEndpoint??endpoint,project,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,transport:knowledgeTransport,includeRoles:true}):null;
+ const allowKnowledgeWrite=async({session,expectedActor,signal})=>{
+  if(!knowledgeRoleMembership)return true;
+  const member=await knowledgeRoleMembership({session,expectedActor,boardId:e.WEFTLINE_REVIEW_BOARD,signal});
+  return !!member&&Array.isArray(member.roles)&&!member.roles.includes('reader');
+ };
  const versioned=e.WEFTLINE_REVIEW_KNOWLEDGE_VERSIONED==='1'?createVersionedKnowledgeComposition({enabled:true,scopedWrite:scopedKnowledgeWrite,endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,database:e.WEFTLINE_KNOWLEDGE_VERSIONED_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_VERSIONED_TABLE_ID,legacyDatabase:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,legacyTable:e.WEFTLINE_KNOWLEDGE_TABLE_ID,boardDatabase:e.APPWRITE_DATABASE,boardTable:e.APPWRITE_TABLE,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,key:values.apikey,maxPayloadBytes:Number(e.WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES),transport:globalThis.fetch}):null;
- const knowledge=enabledKnowledge?createKnowledgeV2Adapter({enabled:true,endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,database:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_TABLE_ID,key:values.apikey,knowledgePayloadMaxBytes:Number(e.WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES),transport:knowledgeTransport}):null;
+ const knowledge=enabledKnowledge?createKnowledgeV2Adapter({enabled:true,endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,database:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_TABLE_ID,key:values.apikey,knowledgePayloadMaxBytes:Number(e.WEFTLINE_KNOWLEDGE_PAYLOAD_MAX_BYTES),transport:knowledgeTransport,...(readerDominatesKnowledgeWrites?{writeAuthorizer:allowKnowledgeWrite}:{})}):null;
  const knowledgeList=e.WEFTLINE_REVIEW_KNOWLEDGE_LIST_V2==='1'?createAppwriteKnowledgeV2Discovery({endpoint,approvedEndpoint:approvedEndpoint ?? endpoint,project,boardId:e.WEFTLINE_REVIEW_BOARD,teamId:e.WEFTLINE_KNOWLEDGE_TEAM_ID,database:e.WEFTLINE_KNOWLEDGE_DATABASE_ID,table:e.WEFTLINE_KNOWLEDGE_TABLE_ID,key:values.apikey}):null;
  // Listing has its own four-slot transport gate, but shares request admission.
  const page=e.WEFTLINE_REVIEW_UI==='1'?reviewBoardPage(e.WEFTLINE_REVIEW_BOARD):null;
@@ -111,7 +122,7 @@ try {
   if(isAuth){if(active>=4)return reject(503);active++;if(!auth){const object=(bytes,keys)=>{const x=parseGuardedJson(bytes);if(!x||typeof x!=='object'||Array.isArray(x)||Object.keys(x).length!==keys.length||!keys.every(k=>Object.hasOwn(x,k)))throw Error('Invalid');return x;};auth=createNodeAuthAdapter({origin:expectedOrigin,endpoint,project,approvedEndpoint,approvedProject,parseLogin:b=>object(b,['email','password']),parseLogout:b=>object(b,[])});}Promise.resolve(auth(req,res)).finally(()=>active--).catch(()=>{});return;}
   const cookies=req.headers.cookie.split(';').map(x=>x.trim()).filter(x=>x.startsWith('__Host-weftline=')),session=cookies.length===1?cookies[0].slice(16):'';
   if(!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(session))return reject(401);
-  if(active>=4)return reject(503);active++;
+  if(active>=4||(isVersioned&&readerDominatesKnowledgeWrites&&knowledgeGate.active>=4))return reject(503);active++;
   let checkpoint;
   const controller=new AbortController(),timer=setTimeout(()=>{controller.abort();reply(202,{status:'unknown',...(checkpoint?{consistency:'advisory-non-snapshot',continuation:checkpoint}:{})});if(!req.complete)req.destroy();},10000);
   const disconnect=()=>{if(!res.writableFinished)controller.abort();};res.once('close',disconnect);
@@ -119,6 +130,7 @@ try {
    if(scopedWriteMethod){
     const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
     if(!exact(input,['scope','intent'])||!exact(input.intent,versionedKeys[scopedWriteMethod]))return reject(400);
+    if(readerDominatesKnowledgeWrites){try{if(await allowKnowledgeWrite({session,expectedActor:input.intent.expectedActor,signal:controller.signal})!==true)return reject(403);}catch{return reject(403);}}
     const method=scopedWriteMethod+'Scoped';
     const result=await versioned[method]({...input.intent,scope:input.scope,session,signal:controller.signal});
     return reply(result.status==='confirmed'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);
@@ -138,6 +150,7 @@ try {
   if(!input||typeof input!=='object'||Array.isArray(input)||Object.hasOwn(input,'session')||Object.hasOwn(input,'signal'))return reject(400);
    const method=req.url.slice('/knowledge/versioned/'.length),keys=versionedKeys[method];
    if(!keys.every(k=>Object.hasOwn(input,k))||Object.keys(input).some(k=>!keys.includes(k)&&!((method==='list'||method==='resolve')&&k==='continuation')))return reject(400);
+   if(readerDominatesKnowledgeWrites&&['create','edit','reconcile'].includes(method)){try{if(await allowKnowledgeWrite({session,expectedActor:input.expectedActor,signal:controller.signal})!==true)return reject(403);}catch{return reject(403);}}
    const result=await versioned[method]({...input,session,signal:controller.signal});
    return reply(result.status==='confirmed'||result.status==='advisory'||result.status==='partial'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);
   }if(isList){if(!input||typeof input!=='object'||Array.isArray(input)||!Object.hasOwn(input,'boardId')||input.boardId!==e.WEFTLINE_REVIEW_BOARD||!id(input.expectedActor)||Object.keys(input).some(k=>!['boardId','expectedActor','continuation'].includes(k)))return reject(400);const result=await knowledgeList({session,expectedActor:input.expectedActor,signal:controller.signal,...(Object.hasOwn(input,'continuation')?{continuation:input.continuation}:{})});return reply(result.status==='partial'?200:result.status==='denied'?403:result.status==='invalid'?400:202,result);}const result=await (req.url==='/review/discovery'?discovery(input,session,controller.signal,value=>{checkpoint=value;}):req.url==='/review/resolve'?resolution(input,session,controller.signal,value=>{checkpoint=value;}):service(isScoped?req.url.slice('/review/scoped-'.length):req.url.slice('/review/'.length),input,session,controller.signal,scopeCheck));const body=Object.fromEntries(Object.entries(result).filter(([k])=>k!=='code'));if(req.url==='/review/discovery'&&result.code===200)Object.assign(body,{actor:input.expectedActor,board:input.board});reply(result.code,body);}catch{reply(202,{status:'unknown'});}finally{clearTimeout(timer);res.removeListener('close',disconnect);active--;}})();

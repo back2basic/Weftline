@@ -16,7 +16,7 @@ export async function startVersionedProvider() {
 if(process.argv[2]==='--provider') {
  const rows=new Map(),transactions=new Map(),metrics={requests:[],commits:0,collisions:0,rollbacks:0,lostCommits:0};let next=0,lose=false,holdCommit=false,heldCommit=null,holdRow=false,heldRow=null,holdAccount=false,heldAccount=null,failAccount=false;
  const root='/v1/tablesdb/db/tables/versions/rows',txroot='/v1/tablesdb/transactions';
- const members=new Set(['creatorSentinel83','bob']),sessions=new Set(['creatorSentinel83','bob','outsider']);
+ const members=new Set(['creatorSentinel83','bob']),sessions=new Set(['creatorSentinel83','bob','outsider']),memberRoles=new Map();
  const send=(res,status,value)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(value));};
  const server=http.createServer(async(req,res)=>{try{
   const u=new URL(req.url,'http://127.0.0.1'),method=req.method;metrics.requests.push({method,path:u.pathname,query:u.search});
@@ -28,7 +28,7 @@ if(process.argv[2]==='--provider') {
   if(u.pathname==='/v1/teams/team/memberships'&&method==='GET'){
    if(!authenticated)return send(res,401,{});const q=JSON.parse(u.searchParams.get('queries[0]')||'null'),l=JSON.parse(u.searchParams.get('queries[1]')||'null');
    if(q?.method!=='equal'||q.attribute!=='userId'||q.values?.length!==1||q.values[0]!==actor||l?.method!=='limit'||l.values?.[0]!==2)return send(res,400,{});
-   const allowed=members.has(actor);return send(res,200,{total:allowed?1:0,memberships:allowed?[{userId:actor,teamId:'team',confirm:true}]:[]});
+   const allowed=members.has(actor),membership={userId:actor,teamId:'team',confirm:true};if(memberRoles.has(actor)){if(memberRoles.get(actor)!==undefined)membership.roles=memberRoles.get(actor);}else membership.roles=['member'];return send(res,200,{total:allowed?1:0,memberships:allowed?[membership]:[]});
   }
   if(u.pathname===txroot&&method==='POST'){if(!admin)return send(res,401,{});const id=`tx${++next}`;transactions.set(id,{status:'pending',rows:new Map()});return send(res,201,{$id:id,status:'pending'});}
   if(u.pathname.startsWith(txroot+'/')&&method==='PATCH'){
@@ -72,6 +72,7 @@ if(process.argv[2]==='--provider') {
   else if(m.action==='account-held')value=!!heldAccount;
   else if(m.action==='release-account'){if(!heldAccount)throw Error('no held account');heldAccount();heldAccount=null;}
   else if(m.action==='membership'){m.value.active?members.add(m.value.actor):members.delete(m.value.actor);}
+  else if(m.action==='roles'){memberRoles.set(m.value.actor,structuredClone(m.value.roles));}
   else if(m.action==='seed'){for(const row of m.value){if(rows.has(row.$id))throw Error('duplicate seed');rows.set(row.$id,structuredClone(row));}}
   else throw Error('unknown control');process.send({reply:m.id,value});
  }catch(e){process.send({reply:m.id,error:e.message});}});
