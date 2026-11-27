@@ -19,7 +19,7 @@ export function createReviewService({store,board}) {
     check();const account=await store.account(session,{signal});check();
     if(!account||account.status!==true||account.$id!==x.expectedActor)return {code:403,status:'denied'};
     const user=account.$id,guard=await store.get(guardId(board,user,x.guardGeneration),{signal});check();
-    if(!['worker','reviewer'].some(role=>equal(guard,{kind:'review-guard-v1',board,user,generation:x.guardGeneration,state:'active',role})))return {code:403,status:'denied'};
+    if(!['worker','reviewer','reader'].some(role=>equal(guard,{kind:'review-guard-v1',board,user,generation:x.guardGeneration,state:'active',role})))return {code:403,status:'denied'};
     const guardSuccessor=await store.get(guardId(board,user,x.guardGeneration+1),{signal});check();
     if(guardSuccessor!==null)return {code:403,status:'denied'};
     const task=await store.get(taskVersionId(board,x.task,x.taskGeneration),{signal});check();

@@ -22,8 +22,8 @@ async function body(request,strict=false){
 }
 // service is an injectable test seam; production-like composition is below.
 export function createKnowledgeAdapter(options={}){ return knowledgeAdapter(options,false); }
-function knowledgeAdapter({enabled=false,service,boardId,knowledgePayloadMaxBytes}={},v2=false){
- if(enabled===true&&(!service||typeof service.create!=='function'||typeof service.read!=='function'||typeof boardId!=='string'))throw Error('Invalid configuration');
+function knowledgeAdapter({enabled=false,service,boardId,knowledgePayloadMaxBytes,writeAuthorizer}={},v2=false){
+ if(enabled===true&&(!service||typeof service.create!=='function'||typeof service.read!=='function'||typeof boardId!=='string'||(writeAuthorizer!==undefined&&typeof writeAuthorizer!=='function')))throw Error('Invalid configuration');
  return (req,res)=>{
   const reject=(status,text)=>{res.writeHead(status,{'connection':'close','cache-control':'no-store'});res.end(text);req.resume();};
   if(enabled!==true)return reject(503,'Knowledge unavailable');
@@ -56,6 +56,9 @@ function knowledgeAdapter({enabled=false,service,boardId,knowledgePayloadMaxByte
    if(!data||typeof data!=='object'||Array.isArray(data)||Object.keys(data).length!==keys.length||keys.some(k=>!Object.hasOwn(data,k)))return reply('Invalid request',400);
    if(data.boardId!==boardId)return reply('Forbidden',403);
    if((preflight||receipt)&&(typeof data.operationId!=='string'||!/^[a-f0-9]{32}$/.test(data.operationId)||(receipt&&(typeof data.expectedFingerprint!=='string'||!/^[a-f0-9]{64}$/.test(data.expectedFingerprint)))))return reply('Invalid request',400);
+   if(writeAuthorizer&&(create||receipt)){
+    try{if(await writeAuthorizer({session,expectedActor:data.expectedActor,signal:request.signal})!==true)return reply('Forbidden',403);}catch{return reply('Denied or unavailable',403);}
+   }
    const controller=new AbortController();let timer,onAbort;
    try{
     const stop=new Promise((_,reject)=>{onAbort=()=>{controller.abort();reject(Error('interrupted'));};request.signal.addEventListener('abort',onAbort,{once:true});if(request.signal.aborted)onAbort();timer=setTimeout(onAbort,10000);});
@@ -73,8 +76,9 @@ function knowledgeAdapter({enabled=false,service,boardId,knowledgePayloadMaxByte
 export function createKnowledgeV2Adapter(config){
  if(!config||types.isProxy(config)||Object.getPrototypeOf(config)!==Object.prototype)throw Error('Invalid configuration');
  const copy={};for(const key of Reflect.ownKeys(config)){const d=Object.getOwnPropertyDescriptor(config,key);if(!d||!Object.hasOwn(d,'value'))throw Error('Invalid configuration');copy[key]=d.value;}
- const service=createActorBoundPrivateKnowledge(copy);
- return knowledgeAdapter({enabled:true,service,boardId:copy.boardId},true);
+ const {writeAuthorizer,...serviceConfig}=copy;
+ const service=createActorBoundPrivateKnowledge(serviceConfig);
+ return knowledgeAdapter({enabled:true,service,boardId:copy.boardId,writeAuthorizer},true);
 }
 export function createKnowledgeListener({tls,v2,...options}={}){
  if(!tls)throw Error('TLS required');
