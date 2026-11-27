@@ -1,6 +1,18 @@
 import {createHash} from 'node:crypto';
 import {guardedBoardPage} from './guarded-board-ui.js';
 
+// Theme preference is cosmetic and never changes authorization or saved intents.
+export function installReviewTheme(document, storage, media) {
+ const button=document.getElementById('theme-toggle');
+ let saved=null;
+ try{const value=storage.getItem('weftline-theme');if(value==='light'||value==='dark')saved=value;}catch{}
+ let theme=saved||(media?.matches?'dark':'light');
+ const render=()=>{document.documentElement.dataset.theme=theme;button.setAttribute('aria-pressed',String(theme==='dark'));};
+ render();
+ button.onclick=()=>{theme=theme==='dark'?'light':'dark';saved=theme;try{storage.setItem('weftline-theme',theme);}catch{}render();};
+ media?.addEventListener?.('change',()=>{if(saved===null){theme=media.matches?'dark':'light';render();}});
+}
+
 // Review UI helpers shared by the mounted, CSP-hashed browser script.
 export function matchesReviewReceipt(intent, httpStatus, response) {
  const keys=['board','expectedActor','guardGeneration','operation','task','taskGeneration','action'];
@@ -27,7 +39,7 @@ export function reviewBoardPage(board) {
  let html=page.html;
  const replace=(from,to)=>{if(!html.includes(from))throw Error('Review UI template changed');html=html.replace(from,to);};
  replace('<meta charset="utf-8">','<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">');
- replace('<title>Review local board</title><h1>Review local board</h1>','<title>Weftline — work board</title><h1>Weftline</h1>');
+ replace('<title>Review local board</title><h1>Review local board</h1>','<title>Weftline — work board</title><button id="theme-toggle" type="button" aria-pressed="false">Dark mode</button><h1>Weftline</h1>');
  replace('<p>Read-only review candidate: writes and receipt reconciliation are not implemented here. Preserve all legacy pending references.</p><form hidden id="create">','<p>Discovery shows observed candidates, not current state. Enter the observed task and generation yourself; preserve all pending references. No direct completion is offered.</p><form id="create">');
  replace('<form hidden id="claim"><h2>Claim existing task</h2>','<form id="claim"><h2>Transition observed task candidate</h2>');
  replace('<button>Claim</button></form>','<button id="action-claim" name="action" value="claim">Claim</button><button id="action-submit" name="action" value="submit">Submit for review</button><button id="action-reject" name="action" value="reject">Reject</button><button id="action-approve" name="action" value="approve">Approve</button></form>');
@@ -40,6 +52,13 @@ export function reviewBoardPage(board) {
  input{min-height:40px;max-width:100%;padding:8px 10px;border:1px solid #aabebb;border-radius:7px;background:#fff;color:var(--ink);font:inherit}button{min-height:40px;margin:4px 8px 4px 0;padding:8px 14px;border:1px solid #aabebb;border-radius:7px;background:#fff;color:#173f3c;font:600 14px system-ui,sans-serif;cursor:pointer}button:hover{background:#eaf4f1}button:focus-visible,input:focus-visible{outline:3px solid #31a093;outline-offset:2px}button:disabled{opacity:.55;cursor:not-allowed}#discover,#login button{background:var(--accent);border-color:var(--accent);color:#fff}#discover:hover,#login button:hover{background:#0b514a}
  #account:not(:empty),#status:not(:empty){padding:10px 13px;border:1px solid #c8d5d2;border-radius:8px;background:#edf2f0;color:#243d3a;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 ui-monospace,monospace}
  .observed-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,13rem),1fr));gap:12px;margin:16px 0 28px}.observed-column{border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0;background:#eaf1ee}.observed-column h3{margin:0;color:#3b5654}.observed-card{border:1px solid #d3e0dc;border-radius:8px;margin-top:10px;padding:12px;min-width:0;background:#fff;box-shadow:0 2px 6px #173e350d}.observed-card>*{display:block;white-space:pre-wrap;overflow-wrap:anywhere;unicode-bidi:plaintext}.observed-card-title{font-weight:700;color:#173e3b;margin:5px 0}.observed-card span{font-size:12px;color:#455e5c}
+ #theme-toggle{float:right;margin-top:0}
+ html[data-theme="dark"]{color-scheme:dark;--ink:#e4efed;--muted:#b6c8c4;--line:#405954;--surface:#1d2b29;--accent:#367f72}
+ html[data-theme="dark"] body{background:#111b1a;color:var(--ink)}html[data-theme="dark"] h1{color:#d7f0e9}html[data-theme="dark"] label{color:#ccded9}
+ html[data-theme="dark"] input,html[data-theme="dark"] button{background:#223430;color:#e4efed;border-color:#526d66}html[data-theme="dark"] button:hover{background:#304b44}
+ html[data-theme="dark"] #discover,html[data-theme="dark"] #login button{background:#367f72;border-color:#367f72;color:#fff}html[data-theme="dark"] #discover:hover,html[data-theme="dark"] #login button:hover{background:#286b5e}
+ html[data-theme="dark"] #account:not(:empty),html[data-theme="dark"] #status:not(:empty){background:#273b36;color:#e2efeb;border-color:#526d66}
+ html[data-theme="dark"] .observed-column{background:#192724}html[data-theme="dark"] .observed-column h3{color:#c2d9d3}html[data-theme="dark"] .observed-card{background:#243632;border-color:#405954}html[data-theme="dark"] .observed-card-title{color:#e2f5ef}html[data-theme="dark"] .observed-card span{color:#c2d9d3}
  @media (max-width: 600px){body{padding:20px 16px 48px}form label{display:flex;margin-right:0}form input{width:100%}.observed-board{grid-template-columns:1fr}button{max-width:100%}}
  `;
  replace('<pre id="tasks"></pre>',`<style>${boardStyle}</style><h2>Observed candidates — advisory and possibly stale</h2><p>Every column is a partial, non-snapshot observation, not current state or authorization. An empty column does not mean no tasks exist.</p><section class="observed-board" aria-label="Advisory observed task candidates">${['ready','claimed','review','completed','unknown'].map(s=>`<section class="observed-column"><h3>${s==='unknown'?'Unknown observation':'Observed '+s}</h3><div id="column-${s}"></div></section>`).join('')}</section><pre hidden id="tasks"></pre><h2>Inspect task versions</h2><label>Task ID <input id="resolve-task" maxlength="36"></label><button type="button" id="resolve-start">Inspect from generation 0</button><button type="button" id="resolve-next">Continue inspection</button><p>Observed candidate is not current and does not authorize a write.</p><pre id="resolve-result"></pre>`);
@@ -66,6 +85,7 @@ export function reviewBoardPage(board) {
  replaceFunction("el('reconcile').onclick=", "addEventListener('storage'",`el('reconcile').onclick=async()=>{if(active)return;active=true;const g=epoch;try{ready();await locked(async()=>{ready();const all=refs();if(all.length!==1||!all[0].key.startsWith(prefix)||all[0].d.intent.expectedActor!==actor||all[0].d.intent.board!==board)throw Error();const ref=all[0],body={...ref.d.intent,currentGuardGeneration:guard()};const r=await request('/review/receipt',body);if(g!==epoch||!await confirm(ref,r)||g!==epoch||performance.now()>=r.deadline)throw Error();remove(ref);showRefs();status('Matching historical receipt confirmed; current task existence is not proven.');});}catch{if(g===epoch)status('Receipt unknown or denied. Preserve the intent; do not retry the write.');}finally{active=false;}};`);
  change("addEventListener('storage'",`async function resolveTask(next){const g=epoch,seq=++resolutionSequence;try{ready();const task=el('resolve-task').value,guardGeneration=guard(),expectedActor=actor,scope=JSON.stringify([expectedActor,guardGeneration,task]);if(!id(task)||(next&&(!resolutionToken||scope!==resolutionScope)))throw Error();if(!next){resolutionToken=null;resolutionScope=null;el('resolve-result').textContent='';}const r=await request('/review/resolve',{board,expectedActor,guardGeneration,task,...(next?{continuation:resolutionToken}:{})});if(g!==epoch||seq!==resolutionSequence||actor!==expectedActor||el('resolve-task').value!==task||guard()!==guardGeneration)return;if(performance.now()>=r.deadline||!r.value||r.value.consistency!=='advisory-non-snapshot'||typeof r.value.continuation!=='string'||r.value.continuation.length>1024)throw Error();if(r.status===202&&r.value.status==='unknown'){resolutionToken=r.value.continuation;resolutionScope=scope;status('Inspection unknown; retry the checkpoint.');return;}const v=r.value;if(r.status!==200||v.status!=='partial'||v.state!=='unknown'||v.actor!==expectedActor||v.board!==board||v.task!==task||!Object.keys(v).every(k=>['status','state','consistency','actor','board','task','observed','continuation'].includes(k)))throw Error();if(v.observed&&(!Number.isSafeInteger(v.observed.generation)||v.observed.generation<0||v.observed.generation>999999||!['ready','claimed','review','completed'].includes(v.observed.state)||(v.observed.claimant!==null&&!id(v.observed.claimant))))throw Error();resolutionToken=v.continuation;resolutionScope=scope;el('resolve-result').textContent=v.observed?'State unknown. Observed candidate, not current: '+JSON.stringify(v.observed):'No candidate observed; state unknown.';status('Inspection is advisory, not a snapshot. Continue or retry explicitly.');}catch{if(g===epoch&&seq===resolutionSequence)status('Inspection unavailable or unknown; do not infer absence.');}}el('resolve-start').onclick=()=>resolveTask(false);el('resolve-next').onclick=()=>resolveTask(true);
  addEventListener('storage'`);
+ script+=`\ntry{let themeStorage;try{themeStorage=localStorage;}catch{}(${installReviewTheme.toString()})(document,themeStorage,typeof matchMedia==='function'?matchMedia('(prefers-color-scheme: dark)'):null);}catch{}`;
  html=html.slice(0,start)+script+html.slice(end);
  const hash=createHash('sha256').update(script).digest('base64');
  const styleHash=createHash('sha256').update(boardStyle).digest('base64');
