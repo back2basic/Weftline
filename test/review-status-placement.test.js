@@ -21,7 +21,7 @@ test('auth mirror preserves the original sole live status and CSP',()=>{
 const enabled=process.env.CHROMIUM_PATH&&process.env.PLAYWRIGHT_CORE&&existsSync(process.env.CHROMIUM_PATH)&&existsSync(process.env.PLAYWRIGHT_CORE);
 test('synthetic cross-actions mirror text without an overlay at short and mobile sizes',{skip:!enabled,timeout:60000},async()=>{
  const {html,csp}=reviewBoardPage('b');
- const server=createServer((req,res)=>{if(req.url==='/'){res.writeHead(200,{'content-type':'text/html','content-security-policy':csp});res.end(html);}else{res.writeHead(401,{'content-type':'application/json'});res.end('{}');}});
+  const server=createServer((req,res)=>{if(req.url==='/'){res.writeHead(200,{'content-type':'text/html','content-security-policy':csp});res.end(html);}else if(req.url==='/account'){res.writeHead(401,{'content-type':'application/json','x-weftline-session-state':'absent'});res.end('{"status":"absent"}');}else if(req.url==='/login'){res.writeHead(502,{'content-type':'text/plain'});res.end('Sign-in outcome unknown');}else{res.writeHead(401,{'content-type':'application/json'});res.end('{}');}});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));let browser,context;
  try{
   const {chromium}=await import(pathToFileURL(process.env.PLAYWRIGHT_CORE));
@@ -52,12 +52,24 @@ test('real handlers mirror changing auth and reconciliation warnings in text-onl
  const html=reviewBoardPage('b').html,script=html.split('<script>')[1].split('</script>')[0],elements=new Map();
  for(const m of html.matchAll(/id="([^"]+)"/g))elements.set(m[1],{value:'',textContent:'',children:[],append(...x){this.children.push(...x);}});
  const storage=new Map(),localStorage={getItem:k=>storage.get(k)??null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k),key:i=>[...storage.keys()][i]??null,get length(){return storage.size;}};
- const calls=[],fetch=async path=>{calls.push(path);return new Response('{}',{status:401});};
+ const calls=[],fetch=async path=>{calls.push(path);if(path==='/account')return new Response('{"status":"absent"}',{status:401,headers:{'x-weftline-session-state':'absent'}});if(path==='/login')return new Response('Sign-in outcome unknown',{status:502});return new Response('{}',{status:401});};
  const context={document:{getElementById:id=>elements.get(id),createElement:()=>({textContent:''})},localStorage,fetch,Response,TextDecoder,TextEncoder,Uint8Array,AbortController,performance,setTimeout,clearTimeout,crypto:globalThis.crypto,navigator:{locks:{request:async(_n,_o,fn)=>fn()}},addEventListener:()=>{}};
  vm.runInNewContext(script,context);
  const mirror=elements.get('auth-status'),bottom=elements.get('status');
  elements.get('email').value='synthetic@example.test';elements.get('password').value='synthetic-value';await elements.get('login').onsubmit({preventDefault(){}});
- assert.match(bottom.textContent,/Sign-in outcome unknown/);assert.equal(mirror.textContent,bottom.textContent);assert.deepEqual(calls,['/login']);
- await elements.get('reconcile').onclick();assert.match(bottom.textContent,/Receipt unknown or denied/);assert.equal(mirror.textContent,bottom.textContent);assert.deepEqual(calls,['/login']);
+ assert.match(bottom.textContent,/Sign-in outcome unknown/);assert.equal(mirror.textContent,bottom.textContent);assert.deepEqual(calls,['/account','/login']);
+ await elements.get('reconcile').onclick();assert.match(bottom.textContent,/Receipt unknown or denied/);assert.equal(mirror.textContent,bottom.textContent);assert.deepEqual(calls,['/account','/login']);
  assert.equal(mirror.children.length,0);assert.equal(bottom.children.length,0);
+});
+
+test('unmarked preflight denial stays denied and never dispatches login',async()=>{
+ const html=reviewBoardPage('b').html,script=html.split('<script>')[1].split('</script>')[0],elements=new Map();
+ for(const m of html.matchAll(/id="([^"]+)"/g))elements.set(m[1],{value:'',textContent:'',children:[],append(...x){this.children.push(...x);}});
+ const storage=new Map(),localStorage={getItem:k=>storage.get(k)??null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k),key:i=>[...storage.keys()][i]??null,get length(){return storage.size;}};
+ const calls=[],fetch=async path=>{calls.push(path);return new Response('{}',{status:401});};
+ const context={document:{getElementById:id=>elements.get(id),createElement:()=>({textContent:''})},localStorage,fetch,Response,TextDecoder,TextEncoder,Uint8Array,AbortController,performance,setTimeout,clearTimeout,crypto:globalThis.crypto,navigator:{locks:{request:async(_n,_o,fn)=>fn()}},addEventListener:()=>{}};
+ vm.runInNewContext(script,context);
+ elements.get('email').value='synthetic@example.test';elements.get('password').value='synthetic-value';await elements.get('login').onsubmit({preventDefault(){}});
+ const bottom=elements.get('status'),mirror=elements.get('auth-status');
+ assert.match(bottom.textContent,/Access denied; display cleared/);assert.doesNotMatch(bottom.textContent,/Sign-in outcome unknown/);assert.equal(mirror.textContent,bottom.textContent);assert.deepEqual(calls,['/account']);assert.equal(storage.has('weftline-guarded-auth-uncertain-v1'),false);
 });

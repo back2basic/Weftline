@@ -299,6 +299,37 @@ test('client login maps an Appwrite cookie to a host-only cookie and uses it for
   assert.ok(calls.every(call => call.options.redirect === 'error'));
 });
 
+test('quoted unrelated cookie preserves an active session for account and logout', async () => {
+ const calls=[];
+ const handler=createClientAuth({origin:'https://board.example',endpoint:'https://provider.example.test/v1',project:'project',transport:async(url,options)=>{
+  calls.push({url,options});
+  if(url.endsWith('/account'))return new Response('{"$id":"alice","status":true}',{status:200});
+  if(url.endsWith('/account/sessions/current'))return new Response(null,{status:204});
+  throw Error('unexpected upstream route');
+ }});
+ const headers={origin:'https://board.example',cookie:'__Host-weftline=active-session; theme="123"'};
+ const account=await handler(makeRequest('https://board.example/account',{headers}));
+ assert.equal(account.status,200);
+ assert.deepEqual(await account.json(),{$id:'alice',status:true});
+ const logout=await handler(makeRequest('https://board.example/logout',{method:'POST',headers}));
+ assert.equal(logout.status,204);
+ assert.match(logout.headers.get('set-cookie'),/Max-Age=0/);
+ assert.deepEqual(calls.map(x=>[x.url,x.options.method]),[
+  ['https://provider.example.test/v1/account','GET'],
+  ['https://provider.example.test/v1/account/sessions/current','DELETE']
+ ]);
+ assert.ok(calls.every(x=>x.options.headers.cookie==='a_session_project=active-session'));
+});
+
+test('missing session is classified absent without provider access', async () => {
+ let calls=0;
+ const handler=createClientAuth({origin:'https://board.example',endpoint:'https://provider.example.test/v1',project:'project',transport:async()=>{calls++;throw Error('unexpected');}});
+ const account=await handler(makeRequest('https://board.example/account'));
+ assert.equal(account.status,401);
+ assert.equal(account.headers.get('x-weftline-session-state'),'absent');
+ assert.equal(calls,0);
+});
+
 
 test('pins the exact approved Appwrite endpoint before any transport call', async () => {
  let calls=0;

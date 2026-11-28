@@ -117,10 +117,10 @@ try {
   if(req.method!==(isAuth&&req.url==='/account'?'GET':'POST'))return reject(405);
   const originOk=count('origin')===1&&req.headers.origin===expectedOrigin||count('origin')===0&&isAuth&&req.url==='/account';
   if(forwarded||count('host')!==1||req.headers.host!==expectedHost||!originOk||count('sec-fetch-site')!==1||req.headers['sec-fetch-site']!=='same-origin'||count('sec-fetch-mode')!==1||req.headers['sec-fetch-mode']!=='cors'||count('sec-fetch-dest')!==1||req.headers['sec-fetch-dest']!=='empty')return reject(403);
-  if((req.method==='POST'&&(count('content-type')!==1||req.headers['content-type']!=='application/json'))||count('content-encoding')||(isAuth&&req.url==='/login'?count('cookie')>1:count('cookie')!==1))return reject(400);
+  if((req.method==='POST'&&(count('content-type')!==1||req.headers['content-type']!=='application/json'))||count('content-encoding')||(isAuth&&req.url==='/login'?count('cookie')>1:isAuth&&req.url==='/account'?count('cookie')>1:count('cookie')!==1))return reject(400);
   if(isAuth&&req.url==='/login'&&count('cookie')&&req.headers.cookie.split(';').filter(x=>x.trim().startsWith('__Host-weftline=')).length>1)return reject(400);
   if(isAuth){if(active>=4)return reject(503);active++;if(!auth){const object=(bytes,keys)=>{const x=parseGuardedJson(bytes);if(!x||typeof x!=='object'||Array.isArray(x)||Object.keys(x).length!==keys.length||!keys.every(k=>Object.hasOwn(x,k)))throw Error('Invalid');return x;};auth=createNodeAuthAdapter({origin:expectedOrigin,endpoint,project,approvedEndpoint,approvedProject,parseLogin:b=>object(b,['email','password']),parseLogout:b=>object(b,[])});}Promise.resolve(auth(req,res)).finally(()=>active--).catch(()=>{});return;}
-  const cookies=req.headers.cookie.split(';').map(x=>x.trim()).filter(x=>x.startsWith('__Host-weftline=')),session=cookies.length===1?cookies[0].slice(16):'';
+  const cookies=(req.headers.cookie??'').split(';').map(x=>x.trim()).filter(x=>x.startsWith('__Host-weftline=')),session=cookies.length===1?cookies[0].slice(16):'';
   if(!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(session))return reject(401);
   if(active>=4||(isVersioned&&readerDominatesKnowledgeWrites&&knowledgeGate.active>=4))return reject(503);active++;
   let checkpoint;
