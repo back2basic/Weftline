@@ -9,7 +9,7 @@ globalThis.fetch=async (url,opt)=>{
   if(!actor||b.password!=='synthetic')return new Response('{}',{status:401});
   return new Response('{}',{status:201,headers:{'set-cookie':`a_session_synthetic-project=${actor}; Path=/; Secure; HttpOnly`}});
  }
- if(u.pathname==='/v1/account'&&opt.headers?.cookie){const actor=opt.headers.cookie.split('=').at(-1);return new Response(JSON.stringify({$id:actor,status:true}),{status:200});}
+ if(u.pathname==='/v1/account'&&opt.headers?.cookie){const actor=opt.headers.cookie.split('=').at(-1);if(!['alice','bob'].includes(actor))return new Response('{}',{status:401});return new Response(JSON.stringify({$id:actor,status:true}),{status:200});}
  if(u.pathname==='/v1/account/sessions/current'&&opt.method==='DELETE')return new Response(null,{status:204});
  return reviewFetch(url,opt);
 };

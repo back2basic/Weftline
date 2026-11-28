@@ -104,9 +104,14 @@ export function createClientAuth({origin, endpoint, project, approvedEndpoint, a
       if (!data || typeof data.email !== 'string' || !data.email || typeof data.password !== 'string' || !data.password) return new Response('Invalid login', {status:400});
       body = JSON.stringify({email:data.email, password:data.password});
     } else if ((path === '/account' && request.method === 'GET') || (path === '/logout' && request.method === 'POST')) {
-      const matches = (request.headers.get('cookie') ?? '').split(';').map(part => part.trim()).filter(part => part.startsWith('__Host-weftline='));
+      const cookie = request.headers.get('cookie');
+      const pairs = cookie === null ? [] : cookie.split(';').map(part => part.trim());
+      const validPair = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+=(?:[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*|"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*")$/;
+      if (cookie !== null && pairs.some(part => !validPair.test(part))) return new Response('Authentication state unavailable', {status:401,headers:{'cache-control':'no-store'}});
+      const matches = pairs.filter(part => part.startsWith('__Host-weftline='));
+      if (path === '/account' && matches.length === 0) return new Response('Authentication required', {status:401,headers:{'cache-control':'no-store','x-weftline-session-state':'absent'}});
       const value = matches.length === 1 ? matches[0].slice('__Host-weftline='.length) : '';
-      if (!/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(value)) return new Response('Authentication required', {status:401});
+      if (matches.length !== 1 || !/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(value)) return new Response('Authentication state unavailable', {status:401,headers:{'cache-control':'no-store'}});
       session = value;
       target = path === '/account' ? '/account' : '/account/sessions/current';
       method = path === '/account' ? 'GET' : 'DELETE';
